@@ -39,10 +39,17 @@ at inference time only imagery is available, no BGT.
   | Small dilated CNN, from scratch | 2,000 × 16 | 1 min | 78.6% | 0.20 | 0.48 | 0.00 | 0.03 | 0.07 |
   | U-Net ResNet-34, from scratch | 10,000 × 32 | 13 min | 85.4% | 0.34 | 0.62 | 0.22 | 0.18 | 0.37 |
   | U-Net ResNet-34, ImageNet | 10,000 × 32 | 13 min | 88.8% | 0.46 | 0.72 | 0.44 | 0.41 | 0.59 |
+  | U-Net ResNet-34, ImageNet | 50,000 × 32 | 54 min | 88.6% | 0.51 | 0.78 | 0.76 | 0.48 | 0.62 |
 
   - At equal training, ImageNet pretraining adds +0.11 mIoU, and roughly doubles bike lane, sidewalk and parking.
     That's more than expected; part of it is faster convergence, so the gap may narrow with longer training.
   - Both U-Nets were still improving at 10,000 steps.
+  - At 50,000 steps (channels-last + compile, ~64 s per 1,000 steps):
+    - mIoU levelled off at 0.511 from step 40,000 on, while the training loss kept dropping. The model is starting
+      to fit the training area rather than generalise, so more steps on Houten alone won't help much.
+    - Accuracy stayed at 88.6%; the gains are in smaller classes: bike lane 0.44 → 0.76, traffic island 0.79,
+      rail 0.87, and driveway is non-zero for the first time (0.05).
+    - Speed bump, paved verge and stairs are still 0.
   - The GPU runs at ~100% utilisation and 2.8 GB of 20 GB memory, so data loading keeps up.
 - **`visualize.py`**: predicts map blocks by overlap-tiling and renders photo | BGT | prediction | errors.
   On validation blocks, the ImageNet U-Net:
@@ -56,7 +63,7 @@ at inference time only imagery is available, no BGT.
 
 Immediate, with the ImageNet U-Net:
 
-- **Train longer** (e.g. 50,000 steps); both U-Nets were still improving at 10,000.
+- ~~**Train longer**~~ Done: 50,000 steps gives 0.51 mIoU and levels off from 40,000.
 - ~~**Time `--channels-last` / `--compile`** on the pod~~ Done: per 500 steps, 51 s plain, 38 s with
   channels-last, 33 s with both (plus ~55 s of compiling once). Use both for long runs. The plain baseline varied
   between runs (77–102 s per 1,000 steps), so treat the exact percentages as rough.

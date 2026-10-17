@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 VAL_FRACTION = 0.15  # the southern strip of the raster is held out
+MAX_SIZE = 512  # largest supported window; centres keep this margin, so every size scores the same target squares
 DEFAULTS = {"imagery": (256, 128), "labels": (160, 32)}  # (size, target) per input
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)  # so pretrained encoders can drop in later
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
@@ -29,9 +30,13 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 class Windows:
     """Random square windows (labels, and optionally the matching imagery), split by north/south strip
-    so train and val never overlap."""
+    so train and val never overlap.
+
+    Window centres are drawn from a range that doesn't depend on `size`, so with the same seed, runs with
+    different window sizes are scored on exactly the same target squares."""
 
     def __init__(self, labels_path: str, imagery_path: str | None, split: str, size: int, seed: int = 0):
+        assert size <= MAX_SIZE, f"windows up to {MAX_SIZE} px are supported"
         self.labels = np.load(labels_path, mmap_mode="r")
         self.imagery = np.load(imagery_path, mmap_mode="r") if imagery_path else None
         if self.imagery is not None:
@@ -39,17 +44,18 @@ class Windows:
         self.size = size
         height, width = self.labels.shape
         val_top = int(height * (1 - VAL_FRACTION))
+        half = MAX_SIZE // 2
         if split == "train":
-            self.row_range = (0, val_top - size)
+            self.row_range = (half, val_top - half)
         else:
-            self.row_range = (val_top, height - size)
-        self.col_range = (0, width - size)
+            self.row_range = (val_top + half, height - half)
+        self.col_range = (half, width - half)
         self.rng = np.random.default_rng(seed)
 
     def sample(self) -> tuple[np.ndarray, np.ndarray]:
         """(size, size) labels and (size, size, 3) uint8 imagery; the imagery is empty without an imagery path."""
-        row = self.rng.integers(*self.row_range)
-        col = self.rng.integers(*self.col_range)
+        row = self.rng.integers(*self.row_range) - self.size // 2
+        col = self.rng.integers(*self.col_range) - self.size // 2
         labels = np.array(self.labels[row:row + self.size, col:col + self.size])
         if self.imagery is None:
             return labels, np.zeros((0, 0, 3), np.uint8)
@@ -153,6 +159,34 @@ class UNet(nn.Module):
         return self.net(x)[:, :, t, t]
 
 
+def load_model(path: str, device: str | torch.device = "cpu"):
+    """A model from a checkpoint written by this script, in eval mode, plus the checkpoint's metadata."""
+    checkpoint = torch.load(path, map_location=device)
+    num_classes, target = len(checkpoint["classes"]), checkpoint["target"]
+    in_channels = num_classes + 1 if checkpoint["input"] == "labels" else 3
+    if checkpoint.get("model_kind") == "unet":
+        model = UNet(in_channels, num_classes, target, checkpoint["encoder"], weights=None)
+    else:
+        model = PatchNet(in_channels, num_classes, target)
+    model.load_state_dict(checkpoint["model"])
+    return model.to(device).eval(), checkpoint
+
+
+def class_weights(pixel_counts: list[int], power: float) -> torch.Tensor:
+    """Loss weights proportional to frequency^-power (0 = even, 0.5 = inverse square root, 1 = inverse),
+    scaled so the average weight per pixel stays 1 and the loss keeps its scale."""
+    counts = torch.tensor(pixel_counts, dtype=torch.float64)
+    weights = torch.where(counts > 0, (counts / counts.max()).clamp(min=1e-12) ** -power, torch.ones_like(counts))
+    weights = weights * counts.sum() / (weights * counts).sum()
+    return weights.float()
+
+
+def print_table(results: dict, class_names: list[str]):
+    print(f"\n{'class':<16}" + "".join(f"{name:>10}" for name in results))
+    for i, name in enumerate(class_names):
+        print(f"{name:<16}" + "".join(f"{results[k]['iou'][i]:>10.3f}" for k in results))
+
+
 def amp_dtype(device: torch.device) -> torch.dtype | None:
     """Mixed precision on GPU: bfloat16 where supported (Ampere+, no loss scaling needed), else float16."""
     if device.type != "cuda":
@@ -214,15 +248,23 @@ def main():
                         help="NHWC memory layout, which tensor cores prefer; same results, often faster on GPU")
     parser.add_argument("--compile", action="store_true",
                         help="torch.compile the model; same results, faster after a slower first steps")
+    parser.add_argument("--class-weight-power", type=float, default=0.0,
+                        help="weight the loss by class frequency^-power: 0 = even, 0.25 = slight, 0.5 = strong")
+    parser.add_argument("--evaluate", metavar="CHECKPOINT",
+                        help="only score this checkpoint on the validation squares (uses its size/target), then exit")
     parser.add_argument("--out", default="data/center_patch.pt")
     args = parser.parse_args()
+    if args.evaluate:
+        checkpoint = torch.load(args.evaluate, map_location="cpu")
+        args.input, args.size, args.target = checkpoint["input"], checkpoint["size"], checkpoint["target"]
     args.size = args.size or DEFAULTS[args.input][0]
     args.target = args.target or DEFAULTS[args.input][1]
     if not 1 <= args.target <= args.size - 2 or (args.size - args.target) % 2:
         parser.error("--target must be smaller than --size, with an even difference so it can be centred")
 
     with open(f"{args.raster}.json") as file:
-        class_names = [name for _, name in sorted(json.load(file)["classes"].items(), key=lambda kv: int(kv[0]))]
+        raster_meta = json.load(file)
+    class_names = [name for _, name in sorted(raster_meta["classes"].items(), key=lambda kv: int(kv[0]))]
     num_classes = len(class_names)
 
     torch.manual_seed(0)
@@ -233,6 +275,13 @@ def main():
     imagery = args.imagery if args.input == "imagery" else None
     val = Windows(f"{args.raster}.npy", imagery, "val", args.size, seed=1)
     val_batches = [val.batch(args.batch) for _ in range(args.val_batches)]  # fixed, so evals are comparable
+
+    if args.evaluate:
+        model, _ = load_model(args.evaluate, device)
+        r = evaluate(model, val_batches, num_classes, args.target, args.input, device)
+        print(f"{args.evaluate}: val acc {r['model']['acc']:.3f} mIoU {r['model']['miou']:.3f}")
+        print_table(r, class_names)
+        return
     train = DataLoader(
         TrainStream(f"{args.raster}.npy", imagery, args.size, augment=not args.no_augment),
         batch_size=args.batch, num_workers=args.workers, pin_memory=cuda,
@@ -252,6 +301,10 @@ def main():
     run_model = torch.compile(model) if args.compile else model  # `model` keeps clean state_dict keys for saving
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, args.lr, total_steps=args.steps)
+    weights = class_weights([raster_meta["pixel_counts"][name] for name in class_names], args.class_weight_power)
+    if args.class_weight_power:
+        print("class weights: " + ", ".join(f"{n} {w:.2f}" for n, w in zip(class_names, weights.tolist())))
+    weights = weights.to(device)
     dtype = amp_dtype(device)
     scaler = torch.amp.GradScaler(enabled=dtype == torch.float16)  # bfloat16 doesn't need loss scaling
     print(f"training {args.model} on {device} ({dtype or 'float32'}), {args.workers} sampling workers, "
@@ -259,12 +312,13 @@ def main():
           f"{', channels-last' if args.channels_last else ''}{', compiled' if args.compile else ''}", flush=True)
 
     meta = {"classes": class_names, "input": args.input, "model_kind": args.model,
-            "encoder": args.encoder if args.model == "unet" else None, "size": args.size, "target": args.target}
+            "encoder": args.encoder if args.model == "unet" else None, "size": args.size, "target": args.target,
+            "class_weight_power": args.class_weight_power}
     start = time.time()
     for step, (labels, images) in enumerate(train, start=1):
         x, y = encode(labels, images, num_classes, args.target, args.input, device, memory_format)
         with torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
-            loss = F.cross_entropy(run_model(x), y)
+            loss = F.cross_entropy(run_model(x), y, weight=weights)
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -282,9 +336,7 @@ def main():
         if step == args.steps:
             break
 
-    print(f"\n{'class':<16}" + "".join(f"{name:>10}" for name in r))
-    for i, name in enumerate(class_names):
-        print(f"{name:<16}" + "".join(f"{r[k]['iou'][i]:>10.3f}" for k in r))
+    print_table(r, class_names)
 
 
 if __name__ == "__main__":

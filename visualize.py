@@ -10,21 +10,10 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-from center_patch import VAL_FRACTION, PatchNet, UNet, encode_imagery
+from center_patch import VAL_FRACTION, encode_imagery, load_model
 from rasterize import CLASSES
 
 PALETTE = np.array([rgb for _, rgb in CLASSES.values()], dtype=np.uint8)
-
-
-def load_model(path: str):
-    checkpoint = torch.load(path, map_location="cpu")
-    num_classes, target = len(checkpoint["classes"]), checkpoint["target"]
-    if checkpoint.get("model_kind") == "unet":
-        model = UNet(3, num_classes, target, checkpoint["encoder"], weights=None)
-    else:
-        model = PatchNet(3, num_classes, target)
-    model.load_state_dict(checkpoint["model"])
-    return model.eval(), checkpoint
 
 
 def predict_block(model, imagery, row: int, col: int, extent: int, size: int, target: int, batch: int = 8):
