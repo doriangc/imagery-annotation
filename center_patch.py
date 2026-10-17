@@ -139,13 +139,35 @@ class PatchNet(nn.Module):
         return self.head(self.encoder(x)[:, :, t, t])
 
 
+class UNet(nn.Module):
+    """U-Net with a timm/torchvision encoder (ImageNet-pretrained or not), cropped to the target square."""
+
+    def __init__(self, in_channels: int, num_classes: int, target: int, encoder: str, weights: str | None):
+        super().__init__()
+        import segmentation_models_pytorch as smp  # only needed for this model
+        self.target = target
+        self.net = smp.Unet(encoder, encoder_weights=weights, in_channels=in_channels, classes=num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        t = target_slice(x.shape[-1], self.target)
+        return self.net(x)[:, :, t, t]
+
+
+def amp_dtype(device: torch.device) -> torch.dtype | None:
+    """Mixed precision on GPU: bfloat16 where supported (Ampere+, no loss scaling needed), else float16."""
+    if device.type != "cuda":
+        return None
+    return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+
 def evaluate(model, val_batches, num_classes, target, input_kind, device):
     """Pixel accuracy and per-class IoU on the target square. With label input, also for a baseline that
     copies, row by row, the nearest visible pixel to the left of the square."""
     model.eval()
     names = ["model", "copy_left"] if input_kind == "labels" else ["model"]
     confusion = {name: torch.zeros(num_classes, num_classes, dtype=torch.long, device=device) for name in names}
-    with torch.no_grad(), torch.autocast(device.type, enabled=device.type == "cuda"):
+    dtype = amp_dtype(device)
+    with torch.no_grad(), torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
         for labels, images in val_batches:
             x, y = encode(labels, images, num_classes, target, input_kind, device)
             t = target_slice(labels.shape[-1], target)
@@ -177,6 +199,9 @@ def main():
     parser.add_argument("--target", type=int, help="side of the central square that is scored "
                                                     "(and hidden, with label input); default 128 / 32")
     parser.add_argument("--no-augment", action="store_true", help="skip the random rotations/flips")
+    parser.add_argument("--model", choices=("dilated", "unet"), default="dilated")
+    parser.add_argument("--encoder", default="resnet34", help="U-Net encoder (any segmentation_models_pytorch name)")
+    parser.add_argument("--encoder-weights", default="imagenet", help="'imagenet', or 'none' to train from scratch")
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--lr", type=float, default=2e-3)
@@ -211,16 +236,24 @@ def main():
     )
 
     in_channels = num_classes + 1 if args.input == "labels" else 3
-    model = PatchNet(in_channels, num_classes, args.target).to(device)
+    if args.model == "unet":
+        if args.size % 32:
+            parser.error("--size must be a multiple of 32 for the U-Net")
+        weights = None if args.encoder_weights == "none" else args.encoder_weights
+        model = UNet(in_channels, num_classes, args.target, args.encoder, weights).to(device)
+    else:
+        model = PatchNet(in_channels, num_classes, args.target).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, args.lr, total_steps=args.steps)
-    scaler = torch.amp.GradScaler(enabled=cuda)  # mixed precision on GPU only
-    print(f"training on {device}, {args.workers} sampling workers", flush=True)
+    dtype = amp_dtype(device)
+    scaler = torch.amp.GradScaler(enabled=dtype == torch.float16)  # bfloat16 doesn't need loss scaling
+    print(f"training {args.model} on {device} ({dtype or 'float32'}), {args.workers} sampling workers, "
+          f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M parameters", flush=True)
 
     start = time.time()
     for step, (labels, images) in enumerate(train, start=1):
         x, y = encode(labels, images, num_classes, args.target, args.input, device)
-        with torch.autocast(device.type, enabled=cuda):
+        with torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
             loss = F.cross_entropy(model(x), y)
         optimizer.zero_grad()
         scaler.scale(loss).backward()
@@ -241,7 +274,8 @@ def main():
     print(f"\n{'class':<16}" + "".join(f"{name:>10}" for name in r))
     for i, name in enumerate(class_names):
         print(f"{name:<16}" + "".join(f"{r[k]['iou'][i]:>10.3f}" for k in r))
-    torch.save({"model": model.state_dict(), "classes": class_names, "input": args.input,
+    torch.save({"model": model.state_dict(), "classes": class_names, "input": args.input, "model_kind": args.model,
+                "encoder": args.encoder if args.model == "unet" else None,
                 "size": args.size, "target": args.target}, args.out)
 
 

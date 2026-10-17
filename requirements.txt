@@ -1,10 +1,13 @@
 # Developed on Python 3.14.
 # On Linux, `pip install -r requirements.txt` pulls the CUDA build of torch. On a CPU-only machine, use the much
-# smaller CPU build instead: pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
+# smaller CPU builds instead: pip install torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cpu
 httpx==0.28.1
 numpy==2.5.4
 pillow==13.0.0
 pyproj==3.8.0
 rasterio==1.5.2
+segmentation-models-pytorch==0.5.0
 shapely==2.2.0
+timm==1.0.30
 torch==2.14.1
+torchvision==0.29.1

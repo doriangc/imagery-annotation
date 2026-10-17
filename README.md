@@ -20,5 +20,6 @@ python center_patch.py                 # train on imagery; uses the GPU when ava
 `data/` is not in git: regenerating it is faster than uploading ~11 GB. On Colab, run the commands with `!`
 in a notebook and copy checkpoints (`data/*.pt`) to Google Drive, since the disk is wiped when the session ends.
 
-Useful `center_patch.py` options: `--batch` (raise it on a GPU), `--workers` (window-sampling processes),
+Useful `center_patch.py` options: `--model unet` (with `--encoder resnet34` and `--encoder-weights imagenet|none`),
+`--batch` (raise it on a GPU), `--workers` (window-sampling processes),
 `--steps`, `--eval-every`, `--no-augment`, and `--input labels` for the labels-only test with its copy-left baseline.
