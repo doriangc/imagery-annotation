@@ -1,4 +1,5 @@
 import httpx
+import os
 import pickle
 
 PAGE_SIZE = 1000
@@ -45,5 +46,6 @@ if __name__ == "__main__":
     HOUTEN_BBOX = (5.1400516, 52.008016, 5.20152, 52.0446192)
     out = fetch(HOUTEN_BBOX)
 
-    with open("houten_bgt.pkl", "wb") as file:
+    os.makedirs("data", exist_ok=True)
+    with open("data/houten_bgt.pkl", "wb") as file:
         pickle.dump(out, file)
