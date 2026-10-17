@@ -258,6 +258,8 @@ def main():
           f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M parameters"
           f"{', channels-last' if args.channels_last else ''}{', compiled' if args.compile else ''}", flush=True)
 
+    meta = {"classes": class_names, "input": args.input, "model_kind": args.model,
+            "encoder": args.encoder if args.model == "unet" else None, "size": args.size, "target": args.target}
     start = time.time()
     for step, (labels, images) in enumerate(train, start=1):
         x, y = encode(labels, images, num_classes, args.target, args.input, device, memory_format)
@@ -276,15 +278,13 @@ def main():
             print(f"step {step:5d}  loss {loss.item():.3f}  "
                   f"val acc {r['model']['acc']:.3f} mIoU {r['model']['miou']:.3f}{baseline}  "
                   f"{time.time() - start:.0f}s", flush=True)
+            torch.save({**meta, "model": model.state_dict(), "step": step, "val_miou": r["model"]["miou"]}, args.out)
         if step == args.steps:
             break
 
     print(f"\n{'class':<16}" + "".join(f"{name:>10}" for name in r))
     for i, name in enumerate(class_names):
         print(f"{name:<16}" + "".join(f"{r[k]['iou'][i]:>10.3f}" for k in r))
-    torch.save({"model": model.state_dict(), "classes": class_names, "input": args.input, "model_kind": args.model,
-                "encoder": args.encoder if args.model == "unet" else None,
-                "size": args.size, "target": args.target}, args.out)
 
 
 if __name__ == "__main__":

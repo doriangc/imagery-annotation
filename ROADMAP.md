@@ -31,17 +31,43 @@ at inference time only imagery is available, no BGT.
     - Large gains on road, sidewalk, bike lane and parking.
     - Speed bump scores 0 (copy-left 0.97): with even weighting the model never predicts this rare class.
       See next step 6.
+- **Imagery runs** (`center_patch.py`, 256 px input, 128 px target, random rotations/flips; RunPod RTX A4500).
+  All scores are on the southern validation strip.
+
+  | Model | Steps × batch | Time | Accuracy | mIoU | Road | Bike lane | Sidewalk | Parking |
+  |---|---|---|---|---|---|---|---|---|
+  | Small dilated CNN, from scratch | 2,000 × 16 | 1 min | 78.6% | 0.20 | 0.48 | 0.00 | 0.03 | 0.07 |
+  | U-Net ResNet-34, from scratch | 10,000 × 32 | 13 min | 85.4% | 0.34 | 0.62 | 0.22 | 0.18 | 0.37 |
+  | U-Net ResNet-34, ImageNet | 10,000 × 32 | 13 min | 88.8% | 0.46 | 0.72 | 0.44 | 0.41 | 0.59 |
+
+  - At equal training, ImageNet pretraining adds +0.11 mIoU, and roughly doubles bike lane, sidewalk and parking.
+    That's more than expected; part of it is faster convergence, so the gap may narrow with longer training.
+  - Both U-Nets were still improving at 10,000 steps.
+  - The GPU runs at ~100% utilisation and 2.8 GB of 20 GB memory, so data loading keeps up.
+- **`visualize.py`**: predicts map blocks by overlap-tiling and renders photo | BGT | prediction | errors.
+  On validation blocks, the ImageNet U-Net:
+  - gets roads and parking rows right, and finds bike lanes
+  - misses narrow footpaths between back gardens
+  - draws blobby boundaries
+  - never predicts driveways
+  - confuses paved plazas with sidewalk, other and parking
 
 ## Next steps
 
-1. **Imagery as input**
-   - Feed RGB crops instead of one-hot labels, with nothing hidden.
-   - Larger target square: e.g. a 256 px input with a 128 px target.
-   - Every scored pixel keeps at least the model's receptive field of context on all sides.
-2. **90° rotations and flips** (all 8 combinations)
-   - Rotate square crops before cutting the window.
-   - Compare with and without, since rotation removes the consistent shadow direction.
-3. **Pretrained encoder.** See the encoder section below.
+Immediate, with the ImageNet U-Net:
+
+- **Train longer** (e.g. 50,000 steps); both U-Nets were still improving at 10,000.
+- ~~**Time `--channels-last` / `--compile`** on the pod~~ Done: per 500 steps, 51 s plain, 38 s with
+  channels-last, 33 s with both (plus ~55 s of compiling once). Use both for long runs. The plain baseline varied
+  between runs (77–102 s per 1,000 steps), so treat the exact percentages as rough.
+- **Larger windows** (384 px input, 256 px target), for whole street profiles and plazas.
+
+Broader steps:
+
+1. ~~**Imagery as input**~~ Done: 256 px input, 128 px target.
+2. ~~**90° rotations and flips**~~ Done (all 8, on by default). A run with `--no-augment` for comparison is
+   still open; rotation removes the consistent shadow direction.
+3. **Pretrained encoder.** ImageNet ResNet-34 done; see the encoder section below for what's next.
 4. **A second town as a test set** (BGT, labels and imagery), held out entirely. This measures generalisation
    beyond Houten's street design and its single photo flight, which the validation strip cannot.
 5. **More towns for training.** Variety, not pixel count, is what limits the dataset.
@@ -65,15 +91,17 @@ at inference time only imagery is available, no BGT.
 
 Plan:
 
-1. A U-Net with an ImageNet-pretrained ResNet-34 or ConvNeXt-T encoder, as the baseline.
-2. The same model trained from scratch, to measure what pretraining adds.
+1. ~~A U-Net with an ImageNet-pretrained ResNet-34 or ConvNeXt-T encoder, as the baseline.~~
+   Done (ResNet-34): 0.46 mIoU at 10,000 steps.
+2. ~~The same model trained from scratch, to measure what pretraining adds.~~ Done: 0.34 mIoU, so pretraining
+   adds +0.11.
 3. DINOv3, both the web and satellite variants, frozen with a light decoder.
    - On CPU: compute the features once and store them, then train only the decoder.
    - Fine-tuning the encoder needs a GPU.
 4. Compare on the Houten validation strip and on the second town.
 
-Expectation: pretraining mostly buys faster convergence and robustness in other towns. Expect a few mIoU points
-over from-scratch, and a smaller gap between the ImageNet CNNs and DINOv3.
+Expectation was a few mIoU points over from-scratch. The measured gap at 10,000 steps is +0.11, larger than
+expected. The gap between the ImageNet CNNs and DINOv3 is still open.
 
 ## Known limitations
 
@@ -85,4 +113,5 @@ over from-scratch, and a smaller gap between the ImageNet CNNs and DINOv3.
 - **Unfetched elevated layers:** where an elevated object we didn't fetch (e.g. a bridge) passes over a road,
   the labels show the road.
 - **JPEG only:** the WMS serves JPEG, so the imagery is compressed one extra time.
-- **No GPU:** everything runs on CPU so far.
+- **Hardware:** training runs on a rented RunPod RTX A4500. The local machine (CPU-only) is used for code
+  changes, short smoke tests and visualisation.
