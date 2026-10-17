@@ -112,12 +112,12 @@ def encode_imagery(images: torch.Tensor) -> torch.Tensor:
     return (images.permute(0, 3, 1, 2).float() / 255 - mean) / std
 
 
-def encode(labels, images, num_classes, target, input_kind, device):
+def encode(labels, images, num_classes, target, input_kind, device, memory_format=torch.contiguous_format):
     """Model input and the target square's labels, on `device`. Encoding happens there, so only uint8 is copied."""
     labels, images = labels.to(device, non_blocking=True).long(), images.to(device, non_blocking=True)
     t = target_slice(labels.shape[-1], target)
     x = encode_labels(labels, num_classes, target) if input_kind == "labels" else encode_imagery(images)
-    return x, labels[:, t, t]
+    return x.contiguous(memory_format=memory_format), labels[:, t, t]
 
 
 class PatchNet(nn.Module):
@@ -160,7 +160,7 @@ def amp_dtype(device: torch.device) -> torch.dtype | None:
     return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
 
-def evaluate(model, val_batches, num_classes, target, input_kind, device):
+def evaluate(model, val_batches, num_classes, target, input_kind, device, memory_format=torch.contiguous_format):
     """Pixel accuracy and per-class IoU on the target square. With label input, also for a baseline that
     copies, row by row, the nearest visible pixel to the left of the square."""
     model.eval()
@@ -169,7 +169,7 @@ def evaluate(model, val_batches, num_classes, target, input_kind, device):
     dtype = amp_dtype(device)
     with torch.no_grad(), torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
         for labels, images in val_batches:
-            x, y = encode(labels, images, num_classes, target, input_kind, device)
+            x, y = encode(labels, images, num_classes, target, input_kind, device, memory_format)
             t = target_slice(labels.shape[-1], target)
             preds = {"model": model(x).argmax(1)}
             if input_kind == "labels":
@@ -210,6 +210,10 @@ def main():
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1),
                         help="DataLoader processes sampling training windows; 0 samples in the main process")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--channels-last", action="store_true",
+                        help="NHWC memory layout, which tensor cores prefer; same results, often faster on GPU")
+    parser.add_argument("--compile", action="store_true",
+                        help="torch.compile the model; same results, faster after a slower first steps")
     parser.add_argument("--out", default="data/center_patch.pt")
     args = parser.parse_args()
     args.size = args.size or DEFAULTS[args.input][0]
@@ -243,18 +247,22 @@ def main():
         model = UNet(in_channels, num_classes, args.target, args.encoder, weights).to(device)
     else:
         model = PatchNet(in_channels, num_classes, args.target).to(device)
+    memory_format = torch.channels_last if args.channels_last else torch.contiguous_format
+    model = model.to(memory_format=memory_format)
+    run_model = torch.compile(model) if args.compile else model  # `model` keeps clean state_dict keys for saving
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, args.lr, total_steps=args.steps)
     dtype = amp_dtype(device)
     scaler = torch.amp.GradScaler(enabled=dtype == torch.float16)  # bfloat16 doesn't need loss scaling
     print(f"training {args.model} on {device} ({dtype or 'float32'}), {args.workers} sampling workers, "
-          f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M parameters", flush=True)
+          f"{sum(p.numel() for p in model.parameters()) / 1e6:.1f}M parameters"
+          f"{', channels-last' if args.channels_last else ''}{', compiled' if args.compile else ''}", flush=True)
 
     start = time.time()
     for step, (labels, images) in enumerate(train, start=1):
-        x, y = encode(labels, images, num_classes, args.target, args.input, device)
+        x, y = encode(labels, images, num_classes, args.target, args.input, device, memory_format)
         with torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
-            loss = F.cross_entropy(model(x), y)
+            loss = F.cross_entropy(run_model(x), y)
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -262,7 +270,7 @@ def main():
         scheduler.step()
 
         if step % args.eval_every == 0 or step == args.steps:
-            r = evaluate(model, val_batches, num_classes, args.target, args.input, device)
+            r = evaluate(run_model, val_batches, num_classes, args.target, args.input, device, memory_format)
             baseline = (f"  (copy-left acc {r['copy_left']['acc']:.3f} mIoU {r['copy_left']['miou']:.3f})"
                         if "copy_left" in r else "")
             print(f"step {step:5d}  loss {loss.item():.3f}  "
