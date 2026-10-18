@@ -38,12 +38,14 @@ CLASSES = {
     9: ("rail", (120, 60, 30)),
     10: ("unused_10", (150, 150, 120)),  # was verge_paved; verges are now split into sidewalk/landscaping, since
                                         # towns map them very differently (Amsterdam: mostly unpaved tree pits)
-    11: ("agri_natural", (150, 200, 110)),
+    11: ("farmland", (150, 200, 110)),  # was agri_natural; woods, reeds etc. are now landscaping, since towns
+                                       # map urban woodland as bos and the training towns' "natural" was farmland
     12: ("stairs", (255, 120, 180)),
 }
 CLASS_ID = {name: i for i, (name, _) in CLASSES.items()}
 
 PAVED = {"open verharding", "gesloten verharding"}
+FARMLAND = {"bouwland", "grasland agrarisch", "fruitteelt", "boomteelt"}  # other vegetation is landscaping
 WEGDEEL_FUNCTIE = {
     "rijbaan lokale weg": "road",
     "rijbaan regionale weg": "road",
@@ -68,11 +70,12 @@ def classify(collection: str, props: dict) -> str | None:
         return WEGDEEL_FUNCTIE.get(props["functie"])
     if collection == "ondersteunendwegdeel":
         if props["functie"] == "verkeerseiland":
-            return "traffic_island"
+            # planted islands look like landscaping; towns differ a lot (Houten 58% planted, most cities <10%)
+            return "traffic_island" if props["fysiek_voorkomen"] in PAVED else "landscaping"
         # berm (verge): paved looks like sidewalk from above; planted, unpaved or half-paved like landscaping
         return "sidewalk" if props["fysiek_voorkomen"] in PAVED else "landscaping"
     if collection == "begroeidterreindeel":
-        return "landscaping" if props["fysiek_voorkomen"] == "groenvoorziening" else "agri_natural"
+        return "farmland" if props["fysiek_voorkomen"] in FARMLAND else "landscaping"
     return None
 
 

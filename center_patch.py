@@ -7,7 +7,8 @@ Two inputs:
 
 The model predicts every pixel, but only the target square is scored: its pixels all have at least
 `(size - target) / 2` px of context on every side, which should cover the model's receptive field.
-Training windows get a random 90° rotation and flip; validation windows stay north-up.
+Training windows get a random 90° rotation and flip, and with --lighting random lighting changes and shadows;
+validation windows stay as they are.
 Runs on a GPU when one is available, with windows sampled by DataLoader worker processes.
 
 Areas (see areas.py) are read from data/<area>_classes_8cm.* and data/<area>_aerial_2026.npy. Training areas
@@ -20,6 +21,7 @@ import time
 
 import numpy as np
 import torch
+from PIL import Image, ImageDraw, ImageFilter
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
@@ -82,14 +84,37 @@ def augment(labels: np.ndarray, image: np.ndarray, rng: np.random.Generator) -> 
     return np.ascontiguousarray(labels), np.ascontiguousarray(image)
 
 
+def photometric(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Random lighting changes of a uint8 RGB window: brightness, contrast, gamma, saturation, a slight colour
+    cast, and half the time a synthetic shadow. Teaches the model not to rely on exact grey values, which vary
+    with shadows, the sun and the photo flight."""
+    x = image.astype(np.float32) / 255
+    if rng.random() < 0.5:  # a soft-edged random polygon, darker and slightly blue, like a cast shadow
+        size = image.shape[0]
+        corners = rng.uniform(-0.25, 1.25, (int(rng.integers(3, 7)), 2)) * size
+        mask = Image.new("L", (size, size), 0)
+        ImageDraw.Draw(mask).polygon([tuple(p) for p in corners], fill=255)
+        mask = np.asarray(mask.filter(ImageFilter.GaussianBlur(rng.uniform(1, 6))), np.float32)[..., None] / 255
+        shade = rng.uniform(0.35, 0.75) * np.array([0.95, 1.0, 1.1], np.float32)
+        x = x * (1 - mask * (1 - shade))
+    gray = x.mean(axis=2, keepdims=True)
+    x = gray + (x - gray) * rng.uniform(0.7, 1.3)  # saturation
+    x = (x - x.mean()) * rng.uniform(0.75, 1.25) + x.mean()  # contrast
+    x = x * rng.uniform(0.75, 1.25) * rng.uniform(0.95, 1.05, 3).astype(np.float32)  # brightness, colour cast
+    x = np.clip(x, 0, 1) ** rng.uniform(0.8, 1.25)  # gamma
+    return (x * 255 + 0.5).astype(np.uint8)
+
+
 class TrainStream(IterableDataset):
     """Endless augmented training windows from one or more areas, each picked in proportion to its training
     area so every square metre is equally likely. Each DataLoader worker samples with its own seed."""
 
-    def __init__(self, sources: list[tuple[str, str | None]], size: int, augment: bool, seed: int = 0):
+    def __init__(self, sources: list[tuple[str, str | None]], size: int, augment: bool, seed: int = 0,
+                 lighting: bool = False):
         self.sources = sources  # (labels_path, imagery_path) per area
         self.size = size
         self.augment = augment
+        self.lighting = lighting
         self.seed = seed
 
     def __iter__(self):
@@ -104,6 +129,8 @@ class TrainStream(IterableDataset):
             labels, image = areas[rng.choice(len(areas), p=p)].sample()
             if self.augment:
                 labels, image = augment(labels, image, rng)
+            if self.lighting and image.size:
+                image = photometric(image, rng)
             yield labels, image
 
 
@@ -168,6 +195,23 @@ class UNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t = target_slice(x.shape[-1], self.target)
         return self.net(x)[:, :, t, t]
+
+
+class FlipRotateAverage(nn.Module):
+    """Wraps a model to average its class probabilities over the 8 rotations/flips of the input (test-time
+    augmentation). The output is a probability map, so argmax works as with logits."""
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        total = 0
+        for flip in (False, True):
+            xf = x.flip(3) if flip else x
+            for k in range(4):  # predict on the transformed input, then undo the transform on the output
+                y = self.model(xf.rot90(k, (2, 3))).float().softmax(1).rot90(-k, (2, 3))
+                total = total + (y.flip(3) if flip else y)
+        return total / 8
 
 
 def load_model(path: str, device: str | torch.device = "cpu"):
@@ -269,6 +313,8 @@ def main():
     parser.add_argument("--target", type=int, help="side of the central square that is scored "
                                                     "(and hidden, with label input); default 128 / 32")
     parser.add_argument("--no-augment", action="store_true", help="skip the random rotations/flips")
+    parser.add_argument("--lighting", action="store_true",
+                        help="also vary brightness, contrast, gamma and colour of training windows, with synthetic shadows")
     parser.add_argument("--model", choices=("dilated", "unet"), default="dilated")
     parser.add_argument("--encoder", default="resnet34", help="U-Net encoder (any segmentation_models_pytorch name)")
     parser.add_argument("--encoder-weights", default="imagenet", help="'imagenet', or 'none' to train from scratch")
@@ -288,6 +334,8 @@ def main():
                         help="weight the loss by class frequency^-power: 0 = even, 0.25 = slight, 0.5 = strong")
     parser.add_argument("--evaluate", metavar="CHECKPOINT",
                         help="only score this checkpoint on the validation squares (uses its size/target), then exit")
+    parser.add_argument("--tta", action="store_true",
+                        help="with --evaluate: average predictions over the 8 rotations/flips (8x slower)")
     parser.add_argument("--out", default="data/center_patch.pt")
     args = parser.parse_args()
     if args.evaluate:
@@ -326,13 +374,15 @@ def main():
 
     if args.evaluate:
         model, _ = load_model(args.evaluate, device)
+        if args.tta:
+            model = FlipRotateAverage(model)
         summaries, per_area = evaluate_groups(model, groups, num_classes, args.target, args.input, device)
         print(f"{args.evaluate}: {report(summaries, per_area)}")
         print_table(summaries, class_names)
         return
     train = DataLoader(
         TrainStream([(f"{labels_path(a)}.npy", imagery_path(a)) for a in args.areas], args.size,
-                    augment=not args.no_augment),
+                    augment=not args.no_augment, lighting=args.lighting),
         batch_size=args.batch, num_workers=args.workers, pin_memory=cuda,
         persistent_workers=args.workers > 0, prefetch_factor=2 if args.workers > 0 else None,  # batches sit in /dev/shm
     )
@@ -363,7 +413,8 @@ def main():
 
     meta = {"classes": class_names, "input": args.input, "model_kind": args.model,
             "encoder": args.encoder if args.model == "unet" else None, "size": args.size, "target": args.target,
-            "class_weight_power": args.class_weight_power, "areas": args.areas, "test_areas": args.test_areas}
+            "class_weight_power": args.class_weight_power, "lighting": args.lighting,
+            "areas": args.areas, "test_areas": args.test_areas}
     start = time.time()
     for step, (labels, images) in enumerate(train, start=1):
         x, y = encode(labels, images, num_classes, args.target, args.input, device, memory_format)

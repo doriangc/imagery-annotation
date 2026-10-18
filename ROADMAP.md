@@ -71,6 +71,15 @@ at inference time only imagery is available, no BGT.
   - Verges: Amsterdam maps mostly unpaved verges (tree pits); other towns mostly traffic islands or planted
     verges. Paved verges are now sidewalk, all others landscaping.
   - Level crossings (`overweg`) are road. Class ids 6 and 10 are kept as empty slots.
+  - Class 11 is now **farmland** only (arable land, agricultural grassland, orchards, tree nurseries). Woods,
+    shrubs, other grassland, reeds and marsh are landscaping. Before, "agri_natural" was farmland in Houten and
+    Veere but mostly urban woodland in Amersfoort, which the model called landscaping (0.02 IoU on Amersfoort).
+  - Traffic islands are now paved islands only; planted ones are landscaping (Houten's islands were 58% planted,
+    most cities' under 10%), the same rule as verges. Prompted by Amersfoort's wide paved medians
+    (`results/06_unet_multi/*r22689_c8230*`), which the model splits between sidewalk, road and island.
+- **Lighting augmentation** (`--lighting`): random brightness, contrast, gamma, saturation, a slight colour cast,
+  and half the time a soft-edged synthetic shadow, on training windows only. For shadowed and differently lit
+  streets; the 2026 photos are leaf-off with long tree and building shadows.
   - Still to watch: speed bumps cover 0.05% of Houten vs 0.7–0.8% of Utrecht and Amersfoort.
 - **Imagery:** Utrecht, Leidsche Rijn, Amersfoort and Amsterdam come from 5 cm photos that the WMS downsamples
   smoothly to our 8 cm grid; the others are native 8 cm.
@@ -98,9 +107,22 @@ at inference time only imagery is available, no BGT.
   - The gap between training towns and Amersfoort is small (0.56 vs 0.48), so the model mostly learns what
     the classes look like rather than one town's labelling.
   - mIoU stalled until the OneCycle LR peak (step 15,000) and rose as it decayed; still rising slightly at 50,000.
-  - Agri/natural scores 0.02 on Amersfoort, which has only 1.3% of it: to be checked in visualisations.
+  - Agri/natural scores 0.02 on Amersfoort: its "agri_natural" is mostly urban woodland, the training towns'
+    is farmland. Fixed in the labels by making class 11 farmland only (see above).
   - Stairs are never predicted. Traffic island dropped from 0.85 (Houten only) to 0.34 on val.
   - Not comparable with the Houten-only numbers: different classes, masked fietsstraten, more towns.
+- **Prediction-time averaging** (`visualize.py --stride/--tta`), same `unet_multi.pt` on 10 random Amersfoort
+  street blocks (768 px, farmland labels; CPU time per block):
+
+  | | plain | overlapping windows | rotations/flips | both |
+  |---|---|---|---|---|
+  | mIoU | 0.571 | 0.575 | 0.587 | 0.588 |
+  | accuracy | 79.1% | 79.4% | 80.5% | 80.4% |
+  | time | 3 s | 15 s | 23 s | 112 s |
+
+  - Rotation/flip averaging gives +0.016 mIoU, mostly parking, landscaping and traffic island (+0.03–0.05).
+  - Overlapping windows remove the visible seams between 128 px squares but add little to the score.
+  - Most blobs remain: they are where the model is unsure (e.g. paved medians), not stitching artefacts.
 
 ## Next steps
 

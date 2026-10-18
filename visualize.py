@@ -1,7 +1,8 @@
 """Predict a block of the map with a center_patch.py checkpoint and render photo | BGT | prediction | errors.
 
-The block is tiled with the model's window: each window predicts only its central target square, and windows
-step by the target size, so every pixel gets the full context margin it was trained with.
+The block is tiled with the model's window: each window predicts only its central target square, so every pixel
+gets the full context margin it was trained with. Windows step by the target size, or by less with --stride, in
+which case overlapping squares are averaged; --tta also averages over rotations and flips.
 """
 import argparse
 import json
@@ -17,19 +18,39 @@ PALETTE = np.full((256, 3), 255, dtype=np.uint8)  # IGNORE shows as white
 PALETTE[:len(CLASSES)] = [rgb for _, rgb in CLASSES.values()]
 
 
-def predict_block(model, imagery, row: int, col: int, extent: int, size: int, target: int, batch: int = 8):
-    """Class ids for imagery[row:row + extent, col:col + extent]; extent must be a multiple of target."""
-    margin = (size - target) // 2
-    starts = [(r, c) for r in range(row, row + extent, target) for c in range(col, col + extent, target)]
-    out = np.zeros((extent, extent), np.uint8)
+def predict_block(model, imagery, row: int, col: int, extent: int, size: int, target: int, stride: int | None = None,
+                  tta: bool = False, batch: int = 8):
+    """Class ids for imagery[row:row + extent, col:col + extent]; extent must be a multiple of stride.
+
+    stride < target overlaps the windows' target squares and averages their class probabilities, so neighbouring
+    windows can't disagree along a seam. tta also averages over the 8 rotations/flips of each window. Pixels need
+    context_margin(size, target, stride) of imagery around the block."""
+    stride = stride or target
+    margin, overlap = (size - target) // 2, target - stride
+    span = extent + 2 * overlap  # squares start up to `overlap` before the block and end up to it after
+    starts = [(r, c) for r in range(row - overlap, row + extent, stride) for c in range(col - overlap, col + extent, stride)]
+    transforms = [(k, flip) for k in range(4) for flip in (False, True)] if tta else [(0, False)]
+    probs = None
     with torch.no_grad():
         for i in range(0, len(starts), batch):
             chunk = starts[i:i + batch]
-            windows = np.stack([imagery[r - margin:r - margin + size, c - margin:c - margin + size] for r, c in chunk])
-            preds = model(encode_imagery(torch.from_numpy(windows))).argmax(1).numpy()
-            for (r, c), pred in zip(chunk, preds):
-                out[r - row:r - row + target, c - col:c - col + target] = pred
-    return out
+            windows = encode_imagery(torch.from_numpy(np.stack(
+                [imagery[r - margin:r - margin + size, c - margin:c - margin + size] for r, c in chunk])))
+            p = 0
+            for k, flip in transforms:  # predict on the transformed window, then undo the transform on the output
+                x = windows.flip(3) if flip else windows
+                y = model(x.rot90(k, (2, 3))).softmax(1).rot90(-k, (2, 3))
+                p = p + (y.flip(3) if flip else y)
+            if probs is None:
+                probs = torch.zeros(p.shape[1], span, span)
+            for (r, c), square in zip(chunk, p):
+                probs[:, r - row + overlap:r - row + overlap + target, c - col + overlap:c - col + overlap + target] += square
+    return probs[:, overlap:overlap + extent, overlap:overlap + extent].argmax(0).numpy().astype(np.uint8)
+
+
+def context_margin(size: int, target: int, stride: int | None = None) -> int:
+    """Imagery needed around a block for predict_block."""
+    return (size - target) // 2 + target - (stride or target)
 
 
 def legend(classes: list[str], width: int) -> Image.Image:
@@ -53,27 +74,32 @@ def main():
                              "never trained on (the val strip of a training area, anywhere in other areas)")
     parser.add_argument("--count", type=int, default=3, help="random blocks when --at isn't given")
     parser.add_argument("--extent", type=int, default=768, help="block side in px (multiple of the model's target)")
+    parser.add_argument("--stride", type=int, help="step between windows (default: the model's target); "
+                        "half the target overlaps windows and averages them")
+    parser.add_argument("--tta", action="store_true", help="also average over the 8 rotations/flips")
     parser.add_argument("--out", default="data/vis")
     args = parser.parse_args()
 
     model, checkpoint = load_model(args.checkpoint)
     size, target, classes = checkpoint["size"], checkpoint["target"], checkpoint["classes"]
-    if args.extent % target:
-        parser.error(f"--extent must be a multiple of the model's target ({target})")
+    stride = args.stride or target
+    if args.extent % target or target % stride:
+        parser.error(f"--extent must be a multiple of the model's target ({target}), which --stride must divide")
     labels = np.load(f"{args.data_dir}/{args.area}_classes_8cm.npy", mmap_mode="r")
     imagery = np.load(f"{args.data_dir}/{args.area}_aerial_2026.npy", mmap_mode="r")
-    margin = (size - target) // 2
+    margin = context_margin(size, target, stride)
     height, width = labels.shape
 
     blocks = args.at
     if not blocks:  # only pixels the model never trained on
         rng = np.random.default_rng(0)
+        pick = context_margin(size, target, 1)  # the same blocks whatever --stride is
         trained_on = args.area in checkpoint.get("areas", ["houten"])
         val_top = int(height * (1 - VAL_FRACTION)) if trained_on else 0
         blocks = []
         while len(blocks) < args.count:
-            r = int(rng.integers(val_top + margin, height - margin - args.extent))
-            c = int(rng.integers(margin, width - margin - args.extent))
+            r = int(rng.integers(val_top + pick, height - pick - args.extent))
+            c = int(rng.integers(pick, width - pick - args.extent))
             block = labels[r:r + args.extent:8, c:c + args.extent:8]
             if np.isin(block, [1, 2, 3, 4]).mean() > 0.25:  # road, bike lane, sidewalk, parking
                 blocks.append((r, c))
@@ -83,7 +109,7 @@ def main():
             parser.error(f"block at {r}, {c} needs {margin} px of imagery around it inside the raster")
         photo = np.array(imagery[r:r + args.extent, c:c + args.extent])
         truth = np.array(labels[r:r + args.extent, c:c + args.extent])
-        pred = predict_block(model, imagery, r, c, args.extent, size, target)
+        pred = predict_block(model, imagery, r, c, args.extent, size, target, stride, args.tta)
         scored = truth != IGNORE
         wrong = (pred != truth) & scored
         errors = (photo * 0.45).astype(np.uint8)

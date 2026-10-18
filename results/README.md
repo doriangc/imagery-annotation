@@ -3,6 +3,22 @@
 Images kept for reference. Grid coordinates (`r…_c…`) are the top-left pixel (row, column) in the 8 cm
 raster `data/houten_classes_8cm.npy`. Rerun a block with `python visualize.py <checkpoint> --at ROW COL`.
 
+## Reference blocks
+
+Fixed Amersfoort (test town) blocks, rendered with every new model so changes can be compared side by side:
+
+| Block | Why |
+|---|---|
+| `r22689_c8230` | **hard case**: wide avenue with paved tree medians, bus lane, bicycle parking, tree and building shadows |
+| `r28160_c16065` | junction with traffic islands, red bike paths, level crossing |
+| `r18804_c10012` | residential street: parking lanes, speed bump, alley between back gardens |
+| `r21686_c31355` | urban woodland next to a street (the farmland relabel) |
+
+```
+python visualize.py CHECKPOINT --area amersfoort --stride 64 --tta \
+    --at 22689 8230 --at 28160 16065 --at 18804 10012 --at 21686 31355 --out results/NN_name/vis
+```
+
 ## 01_labels: BGT class rasters
 
 Colour previews of the rasterized BGT labels for the Houten bbox, at 2 m per preview pixel.
@@ -74,3 +90,15 @@ U-Net ResNet-34 (ImageNet), 384 px windows, 128 px target, class weight power 0.
   farmland (Houten, Veere), while Amersfoort's is mostly urban woodland, which the model calls landscaping.
 - Amersfoort maps wide paved, tree-lined medians as traffic island; the model splits them between sidewalk,
   road and island. A convention question more than a model failure.
+
+`vis_overlap_tta_*`: the same model and blocks predicted with `--stride 64 --tta` (overlapping windows averaged,
+plus the 8 rotations/flips). The straight-edged seam rectangles disappear, e.g. the "other" patches in the
+woodland block; the patchy predictions on the avenue medians stay, since they come from the model's uncertainty.
+These were rendered after the farmland relabel, so the woodland is landscaping in the BGT panel.
+
+## 07_lighting_augmentation: what `--lighting` does to training windows
+
+`examples.png`: three 384 px training-size windows (Amersfoort avenue, Amersfoort residential street, Houten),
+the original on the left and five random draws of `photometric()` in `center_patch.py`. Each draw varies
+brightness, contrast, gamma, saturation and colour cast; about half add a soft-edged synthetic shadow. Labels
+are unchanged.
