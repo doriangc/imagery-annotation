@@ -334,7 +334,7 @@ def main():
         TrainStream([(f"{labels_path(a)}.npy", imagery_path(a)) for a in args.areas], args.size,
                     augment=not args.no_augment),
         batch_size=args.batch, num_workers=args.workers, pin_memory=cuda,
-        persistent_workers=args.workers > 0, prefetch_factor=4 if args.workers > 0 else None,
+        persistent_workers=args.workers > 0, prefetch_factor=2 if args.workers > 0 else None,  # batches sit in /dev/shm
     )
 
     in_channels = num_classes + 1 if args.input == "labels" else 3
