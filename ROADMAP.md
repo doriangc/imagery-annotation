@@ -59,6 +59,22 @@ at inference time only imagery is available, no BGT.
   - never predicts driveways
   - confuses paved plazas with sidewalk, other and parking
 
+## Multiple towns (in progress)
+
+- **Areas** (`areas.py`): Houten plus 3 × 3 km of Utrecht (centre/east), Leidsche Rijn, Amersfoort, Amsterdam
+  (De Pijp/Rivierenbuurt), Nijmegen and Veere (town + countryside). Amersfoort is the held-out test town.
+- **Why:** the Houten model (0.512 mIoU on Houten's val strip) scores 0.191 mIoU on Utrecht.
+- **Label consistency** (`results/label_consistency.md`), and what we changed because of it:
+  - Fietsstraten: Houten labels 23% of their length as bike path and Amsterdam 31%; other towns use carriageway.
+    Road polygons under OSM fietsstraten are now ignored (255) in training and scoring.
+  - Driveways: Utrecht/Leidsche Rijn barely map `inrit`, so driveways are merged into sidewalk.
+  - Verges: Amsterdam maps mostly unpaved verges (tree pits); other towns mostly traffic islands or planted
+    verges. Paved verges are now sidewalk, all others landscaping.
+  - Level crossings (`overweg`) are road. Class ids 6 and 10 are kept as empty slots.
+  - Still to watch: speed bumps cover 0.05% of Houten vs 0.7–0.8% of Utrecht and Amersfoort.
+- **Imagery:** Utrecht, Leidsche Rijn, Amersfoort and Amsterdam come from 5 cm photos that the WMS downsamples
+  smoothly to our 8 cm grid; the others are native 8 cm.
+
 ## Next steps
 
 Immediate, with the ImageNet U-Net:

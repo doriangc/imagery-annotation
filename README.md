@@ -10,16 +10,23 @@ git clone <this repo> && cd bgt-fit
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt        # see the comment in it for CPU-only machines
 
-python bgt_fetch.py                    # BGT for Houten        -> data/houten_bgt.pkl          (a few min)
-python rasterize.py                    # 8 cm class raster     -> data/houten_classes_8cm.*    (~1 min, 2.7 GB)
-python aerial_imagery_fetch.py         # 2026 aerial photos    -> data/houten_aerial_2026.*    (~3 min, 8.1 GB)
+AREAS="houten utrecht leidsche_rijn amersfoort amsterdam nijmegen veere"   # see areas.py
+python bgt_fetch.py $AREAS                                       # BGT -> data/<area>_bgt.pkl
+for a in $AREAS; do python rasterize.py $a; done                 # labels -> data/<area>_classes_8cm.*
+for a in $AREAS; do python aerial_imagery_fetch.py $a; done      # photos -> data/<area>_aerial_2026.*
 
-python center_patch.py                 # train on imagery; uses the GPU when available
+python center_patch.py --model unet --areas houten utrecht leidsche_rijn amsterdam nijmegen veere \
+    --test-areas amersfoort                                      # uses the GPU when available
 ```
+
+Each 3 × 3 km area is about 1.4 GB of labels and 4.3 GB of imagery; Houten (4.2 × 4.1 km) is 2.7 + 8.1 GB.
+`rasterize.py` marks road polygons under OpenStreetMap fietsstraten as ignored (255), since municipalities label
+them inconsistently; `python label_report.py` writes `results/label_consistency.md` comparing BGT conventions.
 
 `data/` is not in git: regenerating it is faster than uploading ~11 GB. On Colab, run the commands with `!`
 in a notebook and copy checkpoints (`data/*.pt`) to Google Drive, since the disk is wiped when the session ends.
 
-Useful `center_patch.py` options: `--model unet` (with `--encoder resnet34` and `--encoder-weights imagenet|none`),
+Useful `center_patch.py` options: `--areas` / `--test-areas`, `--size 384`,
+`--class-weight-power 0.25`, `--evaluate CHECKPOINT`, `--model unet` (with `--encoder resnet34` and `--encoder-weights imagenet|none`),
 `--batch` (raise it on a GPU), `--workers` (window-sampling processes),
 `--steps`, `--eval-every`, `--no-augment`, and `--input labels` for the labels-only test with its copy-left baseline.

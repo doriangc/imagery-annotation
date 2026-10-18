@@ -9,6 +9,9 @@ The model predicts every pixel, but only the target square is scored: its pixels
 `(size - target) / 2` px of context on every side, which should cover the model's receptive field.
 Training windows get a random 90° rotation and flip; validation windows stay north-up.
 Runs on a GPU when one is available, with windows sampled by DataLoader worker processes.
+
+Areas (see areas.py) are read from data/<area>_classes_8cm.* and data/<area>_aerial_2026.npy. Training areas
+(--areas) hold out their southern strip for validation; test areas (--test-areas) are held out entirely.
 """
 import argparse
 import json
@@ -22,6 +25,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 VAL_FRACTION = 0.15  # the southern strip of the raster is held out
+IGNORE = 255  # label of pixels left out of the loss and scores (rasterize.IGNORE)
 MAX_SIZE = 512  # largest supported window; centres keep this margin, so every size scores the same target squares
 DEFAULTS = {"imagery": (256, 128), "labels": (160, 32)}  # (size, target) per input
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)  # so pretrained encoders can drop in later
@@ -29,8 +33,8 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
 class Windows:
-    """Random square windows (labels, and optionally the matching imagery), split by north/south strip
-    so train and val never overlap.
+    """Random square windows (labels, and optionally the matching imagery). split is "train" (north),
+    "val" (the southern VAL_FRACTION strip, so train and val never overlap) or "all" (a held-out test area).
 
     Window centres are drawn from a range that doesn't depend on `size`, so with the same seed, runs with
     different window sizes are scored on exactly the same target squares."""
@@ -45,12 +49,14 @@ class Windows:
         height, width = self.labels.shape
         val_top = int(height * (1 - VAL_FRACTION))
         half = MAX_SIZE // 2
-        if split == "train":
-            self.row_range = (half, val_top - half)
-        else:
-            self.row_range = (val_top + half, height - half)
+        self.row_range = {"train": (half, val_top - half), "val": (val_top + half, height - half),
+                          "all": (half, height - half)}[split]
         self.col_range = (half, width - half)
         self.rng = np.random.default_rng(seed)
+
+    @property
+    def num_centres(self) -> int:
+        return (self.row_range[1] - self.row_range[0]) * (self.col_range[1] - self.col_range[0])
 
     def sample(self) -> tuple[np.ndarray, np.ndarray]:
         """(size, size) labels and (size, size, 3) uint8 imagery; the imagery is empty without an imagery path."""
@@ -77,20 +83,25 @@ def augment(labels: np.ndarray, image: np.ndarray, rng: np.random.Generator) -> 
 
 
 class TrainStream(IterableDataset):
-    """Endless augmented training windows. Each DataLoader worker samples with its own seed."""
+    """Endless augmented training windows from one or more areas, each picked in proportion to its training
+    area so every square metre is equally likely. Each DataLoader worker samples with its own seed."""
 
-    def __init__(self, labels_path: str, imagery_path: str | None, size: int, augment: bool, seed: int = 0):
-        self.args = (labels_path, imagery_path, "train", size)
+    def __init__(self, sources: list[tuple[str, str | None]], size: int, augment: bool, seed: int = 0):
+        self.sources = sources  # (labels_path, imagery_path) per area
+        self.size = size
         self.augment = augment
         self.seed = seed
 
     def __iter__(self):
         info = get_worker_info()
         seed = self.seed + (info.id if info else 0)
-        windows = Windows(*self.args, seed=seed)
+        areas = [Windows(labels, imagery, "train", self.size, seed=seed + 100 * i)
+                 for i, (labels, imagery) in enumerate(self.sources)]
+        p = np.array([a.num_centres for a in areas], dtype=float)
+        p /= p.sum()
         rng = np.random.default_rng(seed + 1000)
         while True:
-            labels, image = windows.sample()
+            labels, image = areas[rng.choice(len(areas), p=p)].sample()
             if self.augment:
                 labels, image = augment(labels, image, rng)
             yield labels, image
@@ -105,7 +116,7 @@ def target_slice(size: int, target: int) -> slice:
 def encode_labels(labels: torch.Tensor, num_classes: int, target: int) -> torch.Tensor:
     """One-hot input with the target square blanked plus a mask channel."""
     t = target_slice(labels.shape[-1], target)
-    x = F.one_hot(labels, num_classes).permute(0, 3, 1, 2).float()
+    x = F.one_hot(labels.masked_fill(labels == IGNORE, 0), num_classes).permute(0, 3, 1, 2).float()
     x[:, :, t, t] = 0
     mask = torch.zeros_like(x[:, :1])
     mask[:, :, t, t] = 1
@@ -181,10 +192,11 @@ def class_weights(pixel_counts: list[int], power: float) -> torch.Tensor:
     return weights.float()
 
 
-def print_table(results: dict, class_names: list[str]):
-    print(f"\n{'class':<16}" + "".join(f"{name:>10}" for name in results))
+def print_table(columns: dict, class_names: list[str]):
+    """Per-class IoU, one column per {name: summarize() result}."""
+    print(f"\n{'class':<16}" + "".join(f"{name:>12}" for name in columns))
     for i, name in enumerate(class_names):
-        print(f"{name:<16}" + "".join(f"{results[k]['iou'][i]:>10.3f}" for k in results))
+        print(f"{name:<16}" + "".join(f"{columns[k]['iou'][i]:>12.3f}" for k in columns))
 
 
 def amp_dtype(device: torch.device) -> torch.dtype | None:
@@ -194,8 +206,17 @@ def amp_dtype(device: torch.device) -> torch.dtype | None:
     return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
 
+def summarize(c: torch.Tensor) -> dict:
+    """Pixel accuracy, mIoU and per-class IoU from a confusion matrix (rows = truth, columns = prediction)."""
+    tp = c.diag().float()
+    iou = tp / (c.sum(0) + c.sum(1) - tp).float().clamp(min=1)
+    present = c.sum(1) > 0
+    iou[~present] = float("nan")  # class absent from these squares: no score rather than a misleading 0
+    return {"acc": (tp.sum() / c.sum()).item(), "miou": iou[present].mean().item(), "iou": iou}
+
+
 def evaluate(model, val_batches, num_classes, target, input_kind, device, memory_format=torch.contiguous_format):
-    """Pixel accuracy and per-class IoU on the target square. With label input, also for a baseline that
+    """Confusion matrices on the target squares, for the model and, with label input, a baseline that
     copies, row by row, the nearest visible pixel to the left of the square."""
     model.eval()
     names = ["model", "copy_left"] if input_kind == "labels" else ["model"]
@@ -208,27 +229,42 @@ def evaluate(model, val_batches, num_classes, target, input_kind, device, memory
             preds = {"model": model(x).argmax(1)}
             if input_kind == "labels":
                 preds["copy_left"] = labels[:, t, t.start - 1:t.start].expand(-1, -1, target).to(device)
+            scored = y != IGNORE
             for name, pred in preds.items():
+                pred = pred.masked_fill(pred == IGNORE, 0)  # copy-left can copy an ignored pixel
                 confusion[name] += torch.bincount(
-                    (y * num_classes + pred).ravel(), minlength=num_classes ** 2,
+                    (y[scored] * num_classes + pred[scored]), minlength=num_classes ** 2,
                 ).view(num_classes, num_classes)
     model.train()
-    results = {}
-    for name, c in confusion.items():
-        c = c.cpu()
-        tp = c.diag().float()
-        iou = tp / (c.sum(0) + c.sum(1) - tp).float().clamp(min=1)
-        present = c.sum(1) > 0
-        iou[~present] = float("nan")  # class absent from the val strip: no score rather than a misleading 0
-        results[name] = {"acc": (tp.sum() / c.sum()).item(), "miou": iou[present].mean().item(), "iou": iou}
-    return results
+    return {name: c.cpu() for name, c in confusion.items()}
+
+
+def evaluate_groups(model, groups, num_classes, target, input_kind, device, memory_format=torch.contiguous_format):
+    """{"val"/"test": {area: batches}} -> pooled summaries per group and per-area mIoU, as
+    ({"val": summary, "val copy_left": summary, "test": summary}, {"houten val": miou, ...})."""
+    pooled, per_area = {}, {}
+    for group, areas in groups.items():
+        for area, batches in areas.items():
+            confusion = evaluate(model, batches, num_classes, target, input_kind, device, memory_format)
+            per_area[f"{area} {group}"] = summarize(confusion["model"])["miou"]
+            for name, c in confusion.items():
+                key = group if name == "model" else f"{group} {name}"
+                pooled[key] = pooled.get(key, 0) + c
+    return {key: summarize(c) for key, c in pooled.items()}, per_area
+
+
+def report(summaries: dict, per_area: dict) -> str:
+    groups = "  ".join(f"{key} acc {r['acc']:.3f} mIoU {r['miou']:.3f}" for key, r in summaries.items())
+    areas = ", ".join(f"{key} {miou:.3f}" for key, miou in per_area.items()) if len(per_area) > 1 else ""
+    return groups + (f"  | per area mIoU: {areas}" if areas else "")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", choices=DEFAULTS, default="imagery")
-    parser.add_argument("--raster", default="data/houten_classes_8cm")
-    parser.add_argument("--imagery", default="data/houten_aerial_2026.npy")
+    parser.add_argument("--areas", nargs="+", default=["houten"], help="training areas; their southern strip is val")
+    parser.add_argument("--test-areas", nargs="*", default=[], help="areas held out entirely, scored as 'test'")
+    parser.add_argument("--data-dir", default="data")
     parser.add_argument("--size", type=int, help="input window side in px (default: 256 imagery, 160 labels)")
     parser.add_argument("--target", type=int, help="side of the central square that is scored "
                                                     "(and hidden, with label input); default 128 / 32")
@@ -240,7 +276,7 @@ def main():
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--eval-every", type=int, default=250)
-    parser.add_argument("--val-batches", type=int, default=50)
+    parser.add_argument("--val-batches", type=int, default=50, help="fixed validation batches per area")
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1),
                         help="DataLoader processes sampling training windows; 0 samples in the main process")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -262,9 +298,19 @@ def main():
     if not 1 <= args.target <= args.size - 2 or (args.size - args.target) % 2:
         parser.error("--target must be smaller than --size, with an even difference so it can be centred")
 
-    with open(f"{args.raster}.json") as file:
-        raster_meta = json.load(file)
-    class_names = [name for _, name in sorted(raster_meta["classes"].items(), key=lambda kv: int(kv[0]))]
+    overlap = set(args.areas) & set(args.test_areas)
+    if overlap:
+        parser.error(f"areas can't be both training and test: {', '.join(sorted(overlap))}")
+    labels_path = lambda area: f"{args.data_dir}/{area}_classes_8cm"
+    imagery_path = lambda area: f"{args.data_dir}/{area}_aerial_2026.npy" if args.input == "imagery" else None
+    raster_meta = {}
+    for area in args.areas + args.test_areas:
+        with open(f"{labels_path(area)}.json") as file:
+            raster_meta[area] = json.load(file)
+    class_names = [name for _, name in sorted(raster_meta[args.areas[0]]["classes"].items(), key=lambda kv: int(kv[0]))]
+    if any([n for _, n in sorted(m["classes"].items(), key=lambda kv: int(kv[0]))] != class_names
+           for m in raster_meta.values()):
+        parser.error("all areas must use the same class table; rerun rasterize.py")
     num_classes = len(class_names)
 
     torch.manual_seed(0)
@@ -272,18 +318,21 @@ def main():
     cuda = device.type == "cuda"
     if cuda:
         torch.backends.cudnn.benchmark = True  # fixed input sizes, so let cuDNN pick the fastest kernels
-    imagery = args.imagery if args.input == "imagery" else None
-    val = Windows(f"{args.raster}.npy", imagery, "val", args.size, seed=1)
-    val_batches = [val.batch(args.batch) for _ in range(args.val_batches)]  # fixed, so evals are comparable
+    groups = {}  # fixed batches, so evals are comparable between steps and runs
+    for group, split, areas in (("val", "val", args.areas), ("test", "all", args.test_areas)):
+        for area in areas:
+            windows = Windows(f"{labels_path(area)}.npy", imagery_path(area), split, args.size, seed=1)
+            groups.setdefault(group, {})[area] = [windows.batch(args.batch) for _ in range(args.val_batches)]
 
     if args.evaluate:
         model, _ = load_model(args.evaluate, device)
-        r = evaluate(model, val_batches, num_classes, args.target, args.input, device)
-        print(f"{args.evaluate}: val acc {r['model']['acc']:.3f} mIoU {r['model']['miou']:.3f}")
-        print_table(r, class_names)
+        summaries, per_area = evaluate_groups(model, groups, num_classes, args.target, args.input, device)
+        print(f"{args.evaluate}: {report(summaries, per_area)}")
+        print_table(summaries, class_names)
         return
     train = DataLoader(
-        TrainStream(f"{args.raster}.npy", imagery, args.size, augment=not args.no_augment),
+        TrainStream([(f"{labels_path(a)}.npy", imagery_path(a)) for a in args.areas], args.size,
+                    augment=not args.no_augment),
         batch_size=args.batch, num_workers=args.workers, pin_memory=cuda,
         persistent_workers=args.workers > 0, prefetch_factor=4 if args.workers > 0 else None,
     )
@@ -301,7 +350,8 @@ def main():
     run_model = torch.compile(model) if args.compile else model  # `model` keeps clean state_dict keys for saving
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, args.lr, total_steps=args.steps)
-    weights = class_weights([raster_meta["pixel_counts"][name] for name in class_names], args.class_weight_power)
+    pixel_counts = [sum(raster_meta[a]["pixel_counts"][name] for a in args.areas) for name in class_names]
+    weights = class_weights(pixel_counts, args.class_weight_power)
     if args.class_weight_power:
         print("class weights: " + ", ".join(f"{n} {w:.2f}" for n, w in zip(class_names, weights.tolist())))
     weights = weights.to(device)
@@ -313,12 +363,12 @@ def main():
 
     meta = {"classes": class_names, "input": args.input, "model_kind": args.model,
             "encoder": args.encoder if args.model == "unet" else None, "size": args.size, "target": args.target,
-            "class_weight_power": args.class_weight_power}
+            "class_weight_power": args.class_weight_power, "areas": args.areas, "test_areas": args.test_areas}
     start = time.time()
     for step, (labels, images) in enumerate(train, start=1):
         x, y = encode(labels, images, num_classes, args.target, args.input, device, memory_format)
         with torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
-            loss = F.cross_entropy(run_model(x), y, weight=weights)
+            loss = F.cross_entropy(run_model(x), y, weight=weights, ignore_index=IGNORE)
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -326,17 +376,16 @@ def main():
         scheduler.step()
 
         if step % args.eval_every == 0 or step == args.steps:
-            r = evaluate(run_model, val_batches, num_classes, args.target, args.input, device, memory_format)
-            baseline = (f"  (copy-left acc {r['copy_left']['acc']:.3f} mIoU {r['copy_left']['miou']:.3f})"
-                        if "copy_left" in r else "")
-            print(f"step {step:5d}  loss {loss.item():.3f}  "
-                  f"val acc {r['model']['acc']:.3f} mIoU {r['model']['miou']:.3f}{baseline}  "
+            summaries, per_area = evaluate_groups(run_model, groups, num_classes, args.target, args.input, device,
+                                                  memory_format)
+            print(f"step {step:5d}  loss {loss.item():.3f}  {report(summaries, per_area)}  "
                   f"{time.time() - start:.0f}s", flush=True)
-            torch.save({**meta, "model": model.state_dict(), "step": step, "val_miou": r["model"]["miou"]}, args.out)
+            torch.save({**meta, "model": model.state_dict(), "step": step, "val_miou": summaries["val"]["miou"],
+                        "test_miou": summaries["test"]["miou"] if "test" in summaries else None}, args.out)
         if step == args.steps:
             break
 
-    print_table(r, class_names)
+    print_table(summaries, class_names)
 
 
 if __name__ == "__main__":

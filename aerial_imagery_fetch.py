@@ -44,10 +44,13 @@ def fetch_tile(client: httpx.Client, layer: str, bbox: tuple, width: int, height
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--grid", default="data/houten_classes_8cm.json", help="label raster metadata from rasterize.py")
+    parser.add_argument("area", nargs="?", default="houten", help="area from areas.py")
+    parser.add_argument("--grid", help="label raster metadata from rasterize.py (default: data/<area>_classes_8cm.json)")
     parser.add_argument("--layer", default="2026_orthoHR", help="WMS layer; a fixed year keeps the dataset reproducible")
-    parser.add_argument("--out", default="data/houten_aerial_2026")
+    parser.add_argument("--out", help="output prefix (default: data/<area>_aerial_2026)")
     args = parser.parse_args()
+    args.grid = args.grid or f"data/{args.area}_classes_8cm.json"
+    args.out = args.out or f"data/{args.area}_aerial_2026"
 
     with open(args.grid) as file:
         grid = json.load(file)
