@@ -102,3 +102,20 @@ These were rendered after the farmland relabel, so the woodland is landscaping i
 the original on the left and five random draws of `photometric()` in `center_patch.py`. Each draw varies
 brightness, contrast, gamma, saturation and colour cast; about half add a soft-edged synthetic shadow. Labels
 are unchanged.
+
+## 08_unet_multi_v2: farmland and paved-island labels, lighting augmentation
+
+Same setup as 06 plus `--lighting`, trained on the relabelled rasters (class 11 farmland only, planted traffic
+islands as landscaping). Reference blocks rendered with `--stride 64 --tta`. Test mIoU 0.544 (0.545 with TTA).
+
+| Block | 06 (overlap+TTA) | 08 (overlap+TTA) |
+|---|---|---|
+| `r22689_c8230` avenue | 72.8% | 76.5% |
+| `r28160_c16065` junction | - | 77.2% |
+| `r18804_c10012` residential | 93.1% | 92.8% |
+| `r21686_c31355` woodland | 88.6% | 88.9% |
+
+- Avenue: the bicycle parking is now sidewalk (sidewalk 80% → 89% of its pixels), but the paved medians are
+  mostly predicted as road; traffic island drops to 16% of its pixels. Parking on the north side is partly
+  predicted as bike lane.
+- The other blocks are essentially unchanged.

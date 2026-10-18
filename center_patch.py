@@ -13,6 +13,10 @@ Runs on a GPU when one is available, with windows sampled by DataLoader worker p
 
 Areas (see areas.py) are read from data/<area>_classes_8cm.* and data/<area>_aerial_2026.npy. Training areas
 (--areas) hold out their southern strip for validation; test areas (--test-areas) are held out entirely.
+
+With --context-scale N, each window also gets a context view: the same number of pixels around the same centre,
+downsampled N times (from data/<area>_aerial_2026_ctxN.npy, built on first use), stacked as 3 extra channels.
+Both views share a centre, so rotations and flips keep them consistent.
 """
 import argparse
 import json
@@ -34,6 +38,45 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)  # so pretr
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
+def context_path(imagery_path: str, scale: int) -> str:
+    return imagery_path.removesuffix(".npy") + f"_ctx{scale}.npy"
+
+
+def build_context(imagery_path: str, scale: int, rows_per_chunk: int = 2048) -> str:
+    """Write a scale x scale block-mean downsampled copy of an imagery raster, if it doesn't exist yet."""
+    path = context_path(imagery_path, scale)
+    if os.path.exists(path):
+        return path
+    imagery = np.load(imagery_path, mmap_mode="r")
+    height, width = imagery.shape[0] // scale, imagery.shape[1] // scale
+    tmp = path.removesuffix(".npy") + ".tmp.npy"  # written under another name, so an interrupted build isn't used
+    out = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.uint8, shape=(height, width, 3))
+    step = rows_per_chunk // scale
+    for r in range(0, height, step):
+        n = min(step, height - r)
+        block = np.asarray(imagery[r * scale:(r + n) * scale, :width * scale], np.float32)
+        out[r:r + n] = (block.reshape(n, scale, width, scale, 3).mean(axis=(1, 3)) + 0.5).astype(np.uint8)
+    out.flush()
+    del out
+    os.replace(tmp, path)
+    return path
+
+
+def crop(raster: np.ndarray, row: int, col: int, size: int) -> np.ndarray:
+    """raster[row:row + size, col:col + size], zero-padded where it extends past the edges."""
+    out = np.zeros((size, size) + raster.shape[2:], raster.dtype)
+    r0, c0 = max(row, 0), max(col, 0)
+    r1, c1 = min(row + size, raster.shape[0]), min(col + size, raster.shape[1])
+    if r0 < r1 and c0 < c1:
+        out[r0 - row:r1 - row, c0 - col:c1 - col] = raster[r0:r1, c0:c1]
+    return out
+
+
+def context_window(context: np.ndarray, scale: int, row: int, col: int, size: int) -> np.ndarray:
+    """The context view for the full-resolution window with top-left (row, col): size px around its centre."""
+    return crop(context, (row + size // 2) // scale - size // 2, (col + size // 2) // scale - size // 2, size)
+
+
 class Windows:
     """Random square windows (labels, and optionally the matching imagery). split is "train" (north),
     "val" (the southern VAL_FRACTION strip, so train and val never overlap) or "all" (a held-out test area).
@@ -41,10 +84,13 @@ class Windows:
     Window centres are drawn from a range that doesn't depend on `size`, so with the same seed, runs with
     different window sizes are scored on exactly the same target squares."""
 
-    def __init__(self, labels_path: str, imagery_path: str | None, split: str, size: int, seed: int = 0):
+    def __init__(self, labels_path: str, imagery_path: str | None, split: str, size: int, seed: int = 0,
+                 context_scale: int = 0):
         assert size <= MAX_SIZE, f"windows up to {MAX_SIZE} px are supported"
         self.labels = np.load(labels_path, mmap_mode="r")
         self.imagery = np.load(imagery_path, mmap_mode="r") if imagery_path else None
+        self.context_scale = context_scale
+        self.context = np.load(context_path(imagery_path, context_scale), mmap_mode="r") if context_scale else None
         if self.imagery is not None:
             assert self.imagery.shape[:2] == self.labels.shape, "imagery and labels must share the pixel grid"
         self.size = size
@@ -61,13 +107,17 @@ class Windows:
         return (self.row_range[1] - self.row_range[0]) * (self.col_range[1] - self.col_range[0])
 
     def sample(self) -> tuple[np.ndarray, np.ndarray]:
-        """(size, size) labels and (size, size, 3) uint8 imagery; the imagery is empty without an imagery path."""
+        """(size, size) labels and (size, size, 3) uint8 imagery, or 6 channels with the context view after
+        the photo; the imagery is empty without an imagery path."""
         row = self.rng.integers(*self.row_range) - self.size // 2
         col = self.rng.integers(*self.col_range) - self.size // 2
         labels = np.array(self.labels[row:row + self.size, col:col + self.size])
         if self.imagery is None:
             return labels, np.zeros((0, 0, 3), np.uint8)
-        return labels, np.array(self.imagery[row:row + self.size, col:col + self.size])
+        image = np.array(self.imagery[row:row + self.size, col:col + self.size])
+        if self.context is not None:
+            image = np.concatenate([image, context_window(self.context, self.context_scale, row, col, self.size)], 2)
+        return labels, image
 
     def batch(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
         """n samples stacked, as the DataLoader would collate them."""
@@ -110,9 +160,10 @@ class TrainStream(IterableDataset):
     area so every square metre is equally likely. Each DataLoader worker samples with its own seed."""
 
     def __init__(self, sources: list[tuple[str, str | None]], size: int, augment: bool, seed: int = 0,
-                 lighting: bool = False):
+                 lighting: bool = False, context_scale: int = 0):
         self.sources = sources  # (labels_path, imagery_path) per area
         self.size = size
+        self.context_scale = context_scale
         self.augment = augment
         self.lighting = lighting
         self.seed = seed
@@ -120,7 +171,7 @@ class TrainStream(IterableDataset):
     def __iter__(self):
         info = get_worker_info()
         seed = self.seed + (info.id if info else 0)
-        areas = [Windows(labels, imagery, "train", self.size, seed=seed + 100 * i)
+        areas = [Windows(labels, imagery, "train", self.size, seed=seed + 100 * i, context_scale=self.context_scale)
                  for i, (labels, imagery) in enumerate(self.sources)]
         p = np.array([a.num_centres for a in areas], dtype=float)
         p /= p.sum()
@@ -129,8 +180,10 @@ class TrainStream(IterableDataset):
             labels, image = areas[rng.choice(len(areas), p=p)].sample()
             if self.augment:
                 labels, image = augment(labels, image, rng)
-            if self.lighting and image.size:
-                image = photometric(image, rng)
+            if self.lighting and image.size:  # the same lighting for the photo and its context view
+                state = int(rng.integers(2 ** 63))
+                image = np.concatenate([photometric(image[..., i:i + 3], np.random.default_rng(state))
+                                        for i in range(0, image.shape[2], 3)], 2)
             yield labels, image
 
 
@@ -151,8 +204,9 @@ def encode_labels(labels: torch.Tensor, num_classes: int, target: int) -> torch.
 
 
 def encode_imagery(images: torch.Tensor) -> torch.Tensor:
-    """(n, size, size, 3) uint8 -> ImageNet-normalised (n, 3, size, size) float."""
-    mean, std = IMAGENET_MEAN.to(images.device), IMAGENET_STD.to(images.device)
+    """(n, size, size, 3k) uint8 (k RGB views) -> ImageNet-normalised (n, 3k, size, size) float."""
+    views = images.shape[-1] // 3
+    mean, std = IMAGENET_MEAN.to(images.device).repeat(1, views, 1, 1), IMAGENET_STD.to(images.device).repeat(1, views, 1, 1)
     return (images.permute(0, 3, 1, 2).float() / 255 - mean) / std
 
 
@@ -184,17 +238,47 @@ class PatchNet(nn.Module):
 
 
 class UNet(nn.Module):
-    """U-Net with a timm/torchvision encoder (ImageNet-pretrained or not), cropped to the target square."""
+    """U-Net with a timm/torchvision encoder (ImageNet-pretrained or not), cropped to the target square.
 
-    def __init__(self, in_channels: int, num_classes: int, target: int, encoder: str, weights: str | None):
+    With context_scale, the input has 3 more channels: a context view `context_scale` times coarser around the
+    same centre. A second encoder reads it; its two deepest feature maps are resampled to the part covering the
+    window and added to the U-Net's two deepest levels through 1x1 convolutions. Those start at zero, so
+    training starts from the plain U-Net."""
+
+    FUSED_LEVELS = 2
+
+    def __init__(self, in_channels: int, num_classes: int, target: int, encoder: str, weights: str | None,
+                 context_scale: int = 0):
         super().__init__()
         import segmentation_models_pytorch as smp  # only needed for this model
         self.target = target
+        self.in_channels = in_channels
+        self.context_scale = context_scale
         self.net = smp.Unet(encoder, encoder_weights=weights, in_channels=in_channels, classes=num_classes)
+        if context_scale:
+            self.context_encoder = smp.encoders.get_encoder(encoder, in_channels=in_channels, weights=weights)
+            channels = self.net.encoder.out_channels[-self.FUSED_LEVELS:]
+            self.fuse = nn.ModuleList(nn.Conv2d(c_ctx, c, 1) for c_ctx, c in
+                                      zip(self.context_encoder.out_channels[-self.FUSED_LEVELS:], channels))
+            for conv in self.fuse:
+                nn.init.zeros_(conv.weight)
+                nn.init.zeros_(conv.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t = target_slice(x.shape[-1], self.target)
-        return self.net(x)[:, :, t, t]
+        if not self.context_scale:
+            return self.net(x)[:, :, t, t]
+        x, context = x[:, :self.in_channels], x[:, self.in_channels:]
+        features = self.net.encoder(x)
+        context_features = self.context_encoder(context)[-self.FUSED_LEVELS:]
+        # the window covers the central 1/scale of the context view, in both directions
+        theta = torch.tensor([[1 / self.context_scale, 0, 0], [0, 1 / self.context_scale, 0]], device=x.device)
+        for i, (conv, ctx) in enumerate(zip(self.fuse, context_features)):
+            level = len(features) - self.FUSED_LEVELS + i
+            grid = F.affine_grid(theta.expand(len(x), 2, 3), list(features[level].shape), align_corners=False)
+            ctx = F.grid_sample(ctx.float(), grid.float(), align_corners=False).to(features[level].dtype)
+            features[level] = features[level] + conv(ctx)
+        return self.net.segmentation_head(self.net.decoder(features))[:, :, t, t]
 
 
 class FlipRotateAverage(nn.Module):
@@ -220,7 +304,8 @@ def load_model(path: str, device: str | torch.device = "cpu"):
     num_classes, target = len(checkpoint["classes"]), checkpoint["target"]
     in_channels = num_classes + 1 if checkpoint["input"] == "labels" else 3
     if checkpoint.get("model_kind") == "unet":
-        model = UNet(in_channels, num_classes, target, checkpoint["encoder"], weights=None)
+        model = UNet(in_channels, num_classes, target, checkpoint["encoder"], weights=None,
+                     context_scale=checkpoint.get("context_scale", 0))
     else:
         model = PatchNet(in_channels, num_classes, target)
     model.load_state_dict(checkpoint["model"])
@@ -315,6 +400,9 @@ def main():
     parser.add_argument("--no-augment", action="store_true", help="skip the random rotations/flips")
     parser.add_argument("--lighting", action="store_true",
                         help="also vary brightness, contrast, gamma and colour of training windows, with synthetic shadows")
+    parser.add_argument("--context-scale", type=int, default=0,
+                        help="U-Net only: add a context view this many times coarser (4 = 123 m around a 384 px "
+                             "window); 0 = off")
     parser.add_argument("--model", choices=("dilated", "unet"), default="dilated")
     parser.add_argument("--encoder", default="resnet34", help="U-Net encoder (any segmentation_models_pytorch name)")
     parser.add_argument("--encoder-weights", default="imagenet", help="'imagenet', or 'none' to train from scratch")
@@ -341,11 +429,14 @@ def main():
     if args.evaluate:
         checkpoint = torch.load(args.evaluate, map_location="cpu")
         args.input, args.size, args.target = checkpoint["input"], checkpoint["size"], checkpoint["target"]
+        args.context_scale = checkpoint.get("context_scale", 0)
     args.size = args.size or DEFAULTS[args.input][0]
     args.target = args.target or DEFAULTS[args.input][1]
     if not 1 <= args.target <= args.size - 2 or (args.size - args.target) % 2:
         parser.error("--target must be smaller than --size, with an even difference so it can be centred")
 
+    if args.context_scale and (args.input != "imagery" or args.model != "unet" and not args.evaluate):
+        parser.error("--context-scale needs imagery input and the U-Net")
     overlap = set(args.areas) & set(args.test_areas)
     if overlap:
         parser.error(f"areas can't be both training and test: {', '.join(sorted(overlap))}")
@@ -360,6 +451,11 @@ def main():
            for m in raster_meta.values()):
         parser.error("all areas must use the same class table; rerun rasterize.py")
     num_classes = len(class_names)
+    if args.context_scale:
+        for area in args.areas + args.test_areas:
+            if not os.path.exists(context_path(imagery_path(area), args.context_scale)):
+                print(f"building the {args.context_scale}x context imagery for {area}", flush=True)
+                build_context(imagery_path(area), args.context_scale)
 
     torch.manual_seed(0)
     device = torch.device(args.device)
@@ -369,7 +465,8 @@ def main():
     groups = {}  # fixed batches, so evals are comparable between steps and runs
     for group, split, areas in (("val", "val", args.areas), ("test", "all", args.test_areas)):
         for area in areas:
-            windows = Windows(f"{labels_path(area)}.npy", imagery_path(area), split, args.size, seed=1)
+            windows = Windows(f"{labels_path(area)}.npy", imagery_path(area), split, args.size, seed=1,
+                              context_scale=args.context_scale)
             groups.setdefault(group, {})[area] = [windows.batch(args.batch) for _ in range(args.val_batches)]
 
     if args.evaluate:
@@ -382,7 +479,7 @@ def main():
         return
     train = DataLoader(
         TrainStream([(f"{labels_path(a)}.npy", imagery_path(a)) for a in args.areas], args.size,
-                    augment=not args.no_augment, lighting=args.lighting),
+                    augment=not args.no_augment, lighting=args.lighting, context_scale=args.context_scale),
         batch_size=args.batch, num_workers=args.workers, pin_memory=cuda,
         persistent_workers=args.workers > 0, prefetch_factor=2 if args.workers > 0 else None,  # batches sit in /dev/shm
     )
@@ -392,7 +489,7 @@ def main():
         if args.size % 32:
             parser.error("--size must be a multiple of 32 for the U-Net")
         weights = None if args.encoder_weights == "none" else args.encoder_weights
-        model = UNet(in_channels, num_classes, args.target, args.encoder, weights).to(device)
+        model = UNet(in_channels, num_classes, args.target, args.encoder, weights, args.context_scale).to(device)
     else:
         model = PatchNet(in_channels, num_classes, args.target).to(device)
     memory_format = torch.channels_last if args.channels_last else torch.contiguous_format
@@ -414,6 +511,7 @@ def main():
     meta = {"classes": class_names, "input": args.input, "model_kind": args.model,
             "encoder": args.encoder if args.model == "unet" else None, "size": args.size, "target": args.target,
             "class_weight_power": args.class_weight_power, "lighting": args.lighting,
+            "context_scale": args.context_scale,
             "areas": args.areas, "test_areas": args.test_areas}
     start = time.time()
     for step, (labels, images) in enumerate(train, start=1):

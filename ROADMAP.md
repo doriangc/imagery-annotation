@@ -123,6 +123,39 @@ at inference time only imagery is available, no BGT.
   - Rotation/flip averaging gives +0.016 mIoU, mostly parking, landscaping and traffic island (+0.03–0.05).
   - Overlapping windows remove the visible seams between 128 px squares but add little to the score.
   - Most blobs remain: they are where the model is unsure (e.g. paved medians), not stitching artefacts.
+- **Second multi-town run** (`data/unet_multi_v2.pt`): as the first, plus `--lighting`, on the farmland and
+  paved-island labels. 2 h 23 min (25% slower: new pod with Python 3.14, or the lighting augmentation).
+
+  | | Houten | Utrecht | Leidsche Rijn | Amsterdam | Nijmegen | Veere | **Amersfoort (test)** |
+  |---|---|---|---|---|---|---|---|
+  | mIoU | 0.681 | 0.522 | 0.494 | 0.549 | 0.430 | 0.602 | **0.544** |
+  | with TTA | 0.651 | 0.525 | 0.509 | 0.550 | 0.450 | 0.622 | **0.545** |
+
+  | | other | road | bike lane | sidewalk | parking | landscaping | traffic island | speed bump | rail | farmland | stairs |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | val | 0.81 | 0.72 | 0.58 | 0.50 | 0.51 | 0.59 | 0.38 | 0.37 | 0.83 | 0.92 | 0.00 |
+  | test | 0.80 | 0.68 | 0.60 | 0.49 | 0.46 | 0.67 | 0.52 | 0.42 | 0.81 | - | 0.00 |
+
+  - Test mIoU 0.479 → 0.544, but mostly from the labels: dropping agri (0.015) alone makes the first run 0.526
+    over the same 10 classes. Landscaping +0.05, traffic island +0.04, speed bump +0.08; road, sidewalk,
+    parking unchanged. Validation mIoU is the same as the first run (0.563).
+  - TTA adds +0.015 on val but only +0.001 on Amersfoort.
+  - Lighting, separated from the labels by scoring the first model on the new labels (both without TTA):
+
+    | | val mIoU | Amersfoort mIoU | road | bike lane | parking | landscaping | speed bump | rail |
+    |---|---|---|---|---|---|---|---|---|
+    | first run (`unet_multi.pt`) | 0.568 | 0.521 | 0.67 | 0.57 | 0.45 | 0.65 | 0.34 | 0.75 |
+    | + lighting, new labels (`unet_multi_v2.pt`) | 0.563 | **0.544** | 0.68 | 0.60 | 0.46 | 0.67 | 0.42 | 0.81 |
+
+    So of the 0.479 → 0.544 gain on Amersfoort, about 0.04 is the relabelling and 0.02 the second run (lighting
+    plus training on the new labels). The 0.02 is spread over 8 of 9 classes, so it's likely real; on the
+    training towns there is no gain (−0.005, within noise). That fits lighting helping with an unseen photo
+    flight more than with towns it has seen.
+- **Context view** (`--context-scale 4`): each 384 px window also gets the same 384 px around the same centre at
+  32 cm (123 m across), from `data/<area>_aerial_2026_ctx4.npy` (block means, built on first use). A second
+  ImageNet ResNet-34 encodes it; its two deepest feature maps are resampled to the window's part and added to the
+  U-Net's two deepest levels through zero-initialised 1x1 convolutions, so training starts as the plain U-Net.
+  Aimed at the avenue medians (`r22689_c8230`), which only make sense with the whole street profile in view.
 
 ## Next steps
 

@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-from center_patch import IGNORE, VAL_FRACTION, encode_imagery, load_model
+from center_patch import IGNORE, VAL_FRACTION, build_context, context_window, encode_imagery, load_model
 from rasterize import CLASSES
 
 PALETTE = np.full((256, 3), 255, dtype=np.uint8)  # IGNORE shows as white
@@ -19,12 +19,13 @@ PALETTE[:len(CLASSES)] = [rgb for _, rgb in CLASSES.values()]
 
 
 def predict_block(model, imagery, row: int, col: int, extent: int, size: int, target: int, stride: int | None = None,
-                  tta: bool = False, batch: int = 8):
+                  tta: bool = False, batch: int = 8, context=None, context_scale: int = 0):
     """Class ids for imagery[row:row + extent, col:col + extent]; extent must be a multiple of stride.
 
     stride < target overlaps the windows' target squares and averages their class probabilities, so neighbouring
     windows can't disagree along a seam. tta also averages over the 8 rotations/flips of each window. Pixels need
-    context_margin(size, target, stride) of imagery around the block."""
+    context_margin(size, target, stride) of imagery around the block. Models with a context view also need the
+    downsampled imagery (`context`, from build_context) and its scale."""
     stride = stride or target
     margin, overlap = (size - target) // 2, target - stride
     span = extent + 2 * overlap  # squares start up to `overlap` before the block and end up to it after
@@ -34,8 +35,11 @@ def predict_block(model, imagery, row: int, col: int, extent: int, size: int, ta
     with torch.no_grad():
         for i in range(0, len(starts), batch):
             chunk = starts[i:i + batch]
-            windows = encode_imagery(torch.from_numpy(np.stack(
-                [imagery[r - margin:r - margin + size, c - margin:c - margin + size] for r, c in chunk])))
+            crops = [imagery[r - margin:r - margin + size, c - margin:c - margin + size] for r, c in chunk]
+            if context is not None:
+                crops = [np.concatenate([crop, context_window(context, context_scale, r - margin, c - margin, size)], 2)
+                         for crop, (r, c) in zip(crops, chunk)]
+            windows = encode_imagery(torch.from_numpy(np.stack(crops)))
             p = 0
             for k, flip in transforms:  # predict on the transformed window, then undo the transform on the output
                 x = windows.flip(3) if flip else windows
@@ -86,7 +90,10 @@ def main():
     if args.extent % target or target % stride:
         parser.error(f"--extent must be a multiple of the model's target ({target}), which --stride must divide")
     labels = np.load(f"{args.data_dir}/{args.area}_classes_8cm.npy", mmap_mode="r")
-    imagery = np.load(f"{args.data_dir}/{args.area}_aerial_2026.npy", mmap_mode="r")
+    imagery_path = f"{args.data_dir}/{args.area}_aerial_2026.npy"
+    imagery = np.load(imagery_path, mmap_mode="r")
+    context_scale = checkpoint.get("context_scale", 0)
+    context = np.load(build_context(imagery_path, context_scale), mmap_mode="r") if context_scale else None
     margin = context_margin(size, target, stride)
     height, width = labels.shape
 
@@ -109,7 +116,8 @@ def main():
             parser.error(f"block at {r}, {c} needs {margin} px of imagery around it inside the raster")
         photo = np.array(imagery[r:r + args.extent, c:c + args.extent])
         truth = np.array(labels[r:r + args.extent, c:c + args.extent])
-        pred = predict_block(model, imagery, r, c, args.extent, size, target, stride, args.tta)
+        pred = predict_block(model, imagery, r, c, args.extent, size, target, stride, args.tta,
+                             context=context, context_scale=context_scale)
         scored = truth != IGNORE
         wrong = (pred != truth) & scored
         errors = (photo * 0.45).astype(np.uint8)
