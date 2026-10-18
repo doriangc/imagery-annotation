@@ -53,3 +53,24 @@ Typical failures in the 10k ImageNet model (03):
 - boundaries are blobby
 - driveways are never predicted
 - paved plazas are confused with sidewalk, other and parking
+
+## 06_unet_multi: multi-town model on Amersfoort (held-out test town)
+
+U-Net ResNet-34 (ImageNet), 384 px windows, 128 px target, class weight power 0.25, 50,000 steps on six towns
+(see ROADMAP). Grid coordinates refer to `data/amersfoort_classes_8cm.npy`. Test mIoU 0.479.
+
+| Block | Contents | Accuracy |
+|---|---|---|
+| `r18804_c10012` | residential street with parking lanes, speed bump, alley between back gardens | 93.0% |
+| `r2877_c733` | random street block | 94.7% |
+| `r22689_c8230` | wide avenue with paved tree medians (BGT: traffic island), bicycle parking | 65.1% |
+| `r28160_c16065` | junction with traffic islands, red bike paths, level crossing | 77.6% |
+| `r21686_c31355` | urban woodland (BGT `loofbos` → agri_natural) next to a street | 11.6% |
+| `r32689_c31245` | park (BGT groenvoorziening) | 98.7% |
+
+- Streets, parking lanes, speed bumps and red bike paths are found well; errors there are mostly 1–3 px edges.
+- The narrow alley between back gardens is still missed.
+- Agri/natural scoring 0.02 on Amersfoort is a class-definition problem: training towns' agri_natural is
+  farmland (Houten, Veere), while Amersfoort's is mostly urban woodland, which the model calls landscaping.
+- Amersfoort maps wide paved, tree-lined medians as traffic island; the model splits them between sidewalk,
+  road and island. A convention question more than a model failure.

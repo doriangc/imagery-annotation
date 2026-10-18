@@ -74,6 +74,33 @@ at inference time only imagery is available, no BGT.
   - Still to watch: speed bumps cover 0.05% of Houten vs 0.7–0.8% of Utrecht and Amersfoort.
 - **Imagery:** Utrecht, Leidsche Rijn, Amersfoort and Amsterdam come from 5 cm photos that the WMS downsamples
   smoothly to our 8 cm grid; the others are native 8 cm.
+- **Class weighting, Houten only** (old 13-class labels, 50,000 steps, 256 px, 100 val batches):
+  `--class-weight-power 0.25` gives 0.548 mIoU vs 0.512 unweighted, at the same accuracy (87.3% vs 87.6%).
+  Speed bump 0 → 0.27, stairs 0 → 0.16, driveway 0.03 → 0.13, sidewalk and parking +0.03; bike lane
+  0.75 → 0.67, rail 0.94 → 0.88. Still improving at the end, unlike the unweighted run.
+- **Larger windows:** a Houten-only 384 px run died at step 15,000 (DataLoader workers out of `/dev/shm`
+  while another run shared the pod; prefetch is now 2 batches per worker). Not retested in isolation:
+  384 px was adopted for the multi-town run directly. It costs ~2.3× time per step (137 s per 1,000 steps).
+- **First multi-town run** (`data/unet_multi.pt`): U-Net ResNet-34 ImageNet, 384 px input, 128 px target,
+  class weight power 0.25, 50,000 × 32, new labels, 1 h 54 min.
+
+  | | Houten | Utrecht | Leidsche Rijn | Amsterdam | Nijmegen | Veere | **Amersfoort (test)** |
+  |---|---|---|---|---|---|---|---|
+  | mIoU | 0.611 | 0.482 | 0.502 | 0.525 | 0.452 | 0.595 | **0.479** |
+
+  Val (all towns) 85.4% / 0.563 mIoU, test 81.9% / 0.479. The Houten-only model scored 0.191 on Utrecht.
+
+  | | other | road | bike lane | sidewalk | parking | landscaping | traffic island | speed bump | rail | agri | stairs |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | val | 0.81 | 0.71 | 0.60 | 0.51 | 0.52 | 0.56 | 0.34 | 0.41 | 0.83 | 0.89 | 0.00 |
+  | test | 0.80 | 0.68 | 0.59 | 0.48 | 0.46 | 0.62 | 0.48 | 0.34 | 0.81 | 0.02 | 0.00 |
+
+  - The gap between training towns and Amersfoort is small (0.56 vs 0.48), so the model mostly learns what
+    the classes look like rather than one town's labelling.
+  - mIoU stalled until the OneCycle LR peak (step 15,000) and rose as it decayed; still rising slightly at 50,000.
+  - Agri/natural scores 0.02 on Amersfoort, which has only 1.3% of it: to be checked in visualisations.
+  - Stairs are never predicted. Traffic island dropped from 0.85 (Houten only) to 0.34 on val.
+  - Not comparable with the Houten-only numbers: different classes, masked fietsstraten, more towns.
 
 ## Next steps
 
@@ -83,7 +110,7 @@ Immediate, with the ImageNet U-Net:
 - ~~**Time `--channels-last` / `--compile`** on the pod~~ Done: per 500 steps, 51 s plain, 38 s with
   channels-last, 33 s with both (plus ~55 s of compiling once). Use both for long runs. The plain baseline varied
   between runs (77–102 s per 1,000 steps), so treat the exact percentages as rough.
-- **Larger windows** (384 px input, 256 px target), for whole street profiles and plazas.
+- ~~**Larger windows**~~ 384 px input with the same 128 px target, used from the multi-town run on.
 
 Broader steps:
 
@@ -91,11 +118,10 @@ Broader steps:
 2. ~~**90° rotations and flips**~~ Done (all 8, on by default). A run with `--no-augment` for comparison is
    still open; rotation removes the consistent shadow direction.
 3. **Pretrained encoder.** ImageNet ResNet-34 done; see the encoder section below for what's next.
-4. **A second town as a test set** (BGT, labels and imagery), held out entirely. This measures generalisation
-   beyond Houten's street design and its single photo flight, which the validation strip cannot.
-5. **More towns for training.** Variety, not pixel count, is what limits the dataset.
-6. **Rare classes.** Weight classes evenly for now. Later, re-weight the loss or oversample windows containing
-   speed bumps, stairs and traffic islands.
+4. ~~**A second town as a test set**~~ Done: Amersfoort, held out entirely.
+5. ~~**More towns for training.**~~ Done: six training towns, 0.191 → 0.479 mIoU on an unseen town.
+6. **Rare classes.** Slight weighting (power 0.25) is on. Stairs are still never predicted; oversampling
+   windows containing them is the next option.
 7. **Cross-section extraction.** Sample windows aligned with road centrelines so the centre column runs
    across the road.
    - This needs arbitrary-angle rotation, which is deliberately postponed.
