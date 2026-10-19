@@ -344,6 +344,16 @@ def summarize(c: torch.Tensor) -> dict:
     return {"acc": (tp.sum() / c.sum()).item(), "miou": iou[present].mean().item(), "iou": iou}
 
 
+def merge_classes(c: torch.Tensor, merges: list[tuple[int, int]]) -> torch.Tensor:
+    """Confusion matrix with each (source, destination) class pair counted as one class, the destination."""
+    c = c.clone()
+    for src, dst in merges:
+        c[dst] += c[src]
+        c[:, dst] += c[:, src]
+        c[src], c[:, src] = 0, 0
+    return c
+
+
 def evaluate(model, val_batches, num_classes, target, input_kind, device, memory_format=torch.contiguous_format):
     """Confusion matrices on the target squares, for the model and, with label input, a baseline that
     copies, row by row, the nearest visible pixel to the left of the square."""
@@ -368,13 +378,16 @@ def evaluate(model, val_batches, num_classes, target, input_kind, device, memory
     return {name: c.cpu() for name, c in confusion.items()}
 
 
-def evaluate_groups(model, groups, num_classes, target, input_kind, device, memory_format=torch.contiguous_format):
+def evaluate_groups(model, groups, num_classes, target, input_kind, device, memory_format=torch.contiguous_format,
+                    merges=()):
     """{"val"/"test": {area: batches}} -> pooled summaries per group and per-area mIoU, as
-    ({"val": summary, "val copy_left": summary, "test": summary}, {"houten val": miou, ...})."""
+    ({"val": summary, "val copy_left": summary, "test": summary}, {"houten val": miou, ...}).
+    `merges` lists (source, destination) class pairs scored as one class."""
     pooled, per_area = {}, {}
     for group, areas in groups.items():
         for area, batches in areas.items():
             confusion = evaluate(model, batches, num_classes, target, input_kind, device, memory_format)
+            confusion = {name: merge_classes(c, merges) for name, c in confusion.items()}
             per_area[f"{area} {group}"] = summarize(confusion["model"])["miou"]
             for name, c in confusion.items():
                 key = group if name == "model" else f"{group} {name}"
@@ -424,6 +437,8 @@ def main():
                         help="only score this checkpoint on the validation squares (uses its size/target), then exit")
     parser.add_argument("--tta", action="store_true",
                         help="with --evaluate: average predictions over the 8 rotations/flips (8x slower)")
+    parser.add_argument("--merge", nargs="+", default=[], metavar="FROM=TO",
+                        help="with --evaluate: score class FROM as TO, e.g. traffic_island=sidewalk")
     parser.add_argument("--out", default="data/center_patch.pt")
     args = parser.parse_args()
     if args.evaluate:
@@ -473,7 +488,9 @@ def main():
         model, _ = load_model(args.evaluate, device)
         if args.tta:
             model = FlipRotateAverage(model)
-        summaries, per_area = evaluate_groups(model, groups, num_classes, args.target, args.input, device)
+        merges = [tuple(class_names.index(name) for name in pair.split("=")) for pair in args.merge]
+        summaries, per_area = evaluate_groups(model, groups, num_classes, args.target, args.input, device,
+                                              merges=merges)
         print(f"{args.evaluate}: {report(summaries, per_area)}")
         print_table(summaries, class_names)
         return
