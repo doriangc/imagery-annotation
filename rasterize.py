@@ -33,7 +33,8 @@ CLASSES = {
     5: ("landscaping", (60, 170, 70)),
     6: ("unused_6", (160, 120, 200)),  # was driveway, now merged into sidewalk (not every town maps inrit); id kept
                                      # so class ids and earlier checkpoints stay compatible
-    7: ("traffic_island", (240, 160, 40)),
+    7: ("unused_7", (240, 160, 40)),  # was traffic_island; paved islands are now sidewalk, since towns differ
+                                     # (Rotterdam maps paved medians as berm) and from above they look the same
     8: ("speed_bump", (255, 240, 0)),
     9: ("rail", (120, 60, 30)),
     10: ("unused_10", (150, 150, 120)),  # was verge_paved; verges are now split into sidewalk/landscaping, since
@@ -69,10 +70,8 @@ def classify(collection: str, props: dict) -> str | None:
             return "speed_bump"
         return WEGDEEL_FUNCTIE.get(props["functie"])
     if collection == "ondersteunendwegdeel":
-        if props["functie"] == "verkeerseiland":
-            # planted islands look like landscaping; towns differ a lot (Houten 58% planted, most cities <10%)
-            return "traffic_island" if props["fysiek_voorkomen"] in PAVED else "landscaping"
-        # berm (verge): paved looks like sidewalk from above; planted, unpaved or half-paved like landscaping
+        # traffic islands and verges (berm): paved looks like sidewalk from above; planted, unpaved or half-paved
+        # like landscaping. Towns differ a lot in which they map (Houten 58% planted islands, most cities <10%)
         return "sidewalk" if props["fysiek_voorkomen"] in PAVED else "landscaping"
     if collection == "begroeidterreindeel":
         return "farmland" if props["fysiek_voorkomen"] in FARMLAND else "landscaping"

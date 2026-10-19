@@ -190,6 +190,15 @@ at inference time only imagery is available, no BGT.
     bicycle parking, like the context view did.
   - Not adopted: 1.5x / 2.1x the training time for no gain on the unseen town. ResNet-34 stays the encoder, which
     also keeps runs short for adding towns.
+- **Boulevard towns** (`areas.py`): `den_haag` (Koningskade, Zeestraat), `rotterdam` (Coolsingel, Weena,
+  Westersingel), `eindhoven` (Kennedylaan, Fuutlaan), ~3 x 3 km each, for more wide streets with medians.
+  `label_report.py` shows no new conventions for roads or fietsstraten, but Rotterdam maps paved medians as berm
+  (so sidewalk) where Amersfoort and Houten use verkeerseiland.
+- **Traffic island merged into sidewalk** (`rasterize.py`, class 7 now `unused_7`): paved islands look like
+  sidewalk from above, towns label them differently (above), and the distinction can be recovered afterwards
+  from position (paved strip between carriageways). Planted islands stay landscaping. For comparison with
+  earlier models, `--evaluate ... --merge traffic_island=sidewalk` scores an old checkpoint the same way, on
+  the old labels.
 
 ## Next steps
 
