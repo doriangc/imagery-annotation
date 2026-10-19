@@ -223,6 +223,10 @@ at inference time only imagery is available, no BGT.
   of junction `r28160_c16065`. Now the overlap must also be at least 0.3 of the polygon's length (half its
   perimeter). Checked on photos: below 0.3 mostly crossings; 0.3–0.5 mostly short pieces of the route itself.
   Un-ignores 0–16,000 m² per town (Nijmegen most; Amersfoort 88 → 77 polygons). Not yet in any training run.
+- **Level crossings as rail** (`rasterize.py`): BGT's `overweg` is the track corridor where rails cross a road,
+  bike path or service path (checked on photos in Utrecht and Amersfoort: rails visible in every sample), not the
+  road surface. As road it made roads seem to run along the track (junction `r28160_c16065`). Now rail. Small:
+  74 polygons in Utrecht, 19 in Amersfoort, 0 in Houten, mostly under 60 m². Not yet in any training run.
 
 ## Next steps
 

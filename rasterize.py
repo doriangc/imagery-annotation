@@ -61,7 +61,7 @@ WEGDEEL_FUNCTIE = {
     "voetpad op trap": "stairs",
     "parkeervlak": "parking",
     "inrit": "sidewalk",  # driveways; some municipalities don't map them separately
-    "overweg": "road",  # level crossing
+    "overweg": "rail",  # level crossing: BGT draws the track corridor through the crossing, rails visible
     "spoorbaan": "rail",
 }
 

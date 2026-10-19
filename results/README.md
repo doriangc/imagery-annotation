@@ -182,3 +182,6 @@ both are scored on the same truth. Reference blocks with `--stride 64 --tta`:
   clean sidewalk strip. The lower median, between the second carriageway and the parking lane, is still mostly
   road, the bicycle parking gets a straight-edged block of "other" (as in 09, 11 and 12), and tree crowns over
   the lower sidewalk become landscaping.
+- `new_labels_*`: the same model against Amersfoort re-rasterized with the fietsstraat fix and level crossings
+  as rail (both after this run). The junction's main road is now scored (road 86% → 93%), and the track through
+  the junction is rail, which this model, trained with it as road, gets 41% of.
