@@ -119,3 +119,47 @@ islands as landscaping). Reference blocks rendered with `--stride 64 --tta`. Tes
   mostly predicted as road; traffic island drops to 16% of its pixels. Parking on the north side is partly
   predicted as bike lane.
 - The other blocks are essentially unchanged.
+
+## 09_unet_context: with a 4x context view (`--context-scale 4`)
+
+Same as 08 plus the 123 m context view. Test mIoU 0.549 (08: 0.544). Reference blocks with `--stride 64 --tta`:
+
+| Block | 08 | 09 |
+|---|---|---|
+| `r22689_c8230` avenue | 76.5% | 61.1% |
+| `r28160_c16065` junction | 77.2% | 77.8% |
+| `r18804_c10012` residential | 92.8% | 93.4% |
+| `r21686_c31355` woodland | 88.9% | 76.2% |
+
+- Avenue: the medians are now mostly sidewalk (island 6% of its pixels), and the bicycle parking is "other" again.
+- Woodland: large straight-edged patches of "other" that follow the window grid, even with overlapping windows:
+  neighbouring windows disagree strongly, which suggests the context view sways whole windows at once.
+
+## 10_median_labels: how training towns label median-like paved strips
+
+Question: do training towns label paved medians like Amersfoort's avenue (`r22689_c8230`) as something other than
+traffic island? `medians.py` finds paved, long, narrow polygons whose boundary touches road, parking or bike lane
+for at least 65% of its length. `random_strips_utrecht_houten.png` shows random matches (photo | BGT).
+
+- The automatic count is not reliable: most matches are ordinary footpaths between a road and a parking lane or
+  bike path, station platforms or car-park walkways, all correctly sidewalk.
+- Real medians in Houten (arterial roads) and Utrecht (road/bike path separators) are labelled traffic island,
+  so there's no sign of a convention difference for medians as such.
+- Amersfoort's medians are unusual: wide, tree-lined, with tree pits, between a carriageway and a parking lane.
+  In the training towns that look (trees in pits next to parking) almost always belongs to a sidewalk.
+
+## 11_unet_convnext_tiny, 12_unet_convnext_small: ConvNeXt encoders
+
+Same as 08 with `--encoder tu-convnext_tiny` / `tu-convnext_small`. Test mIoU 0.550 / 0.546 (08: 0.544).
+Reference blocks with `--stride 64 --tta`:
+
+| Block | 08 (ResNet-34) | 11 (ConvNeXt-T) | 12 (ConvNeXt-S) |
+|---|---|---|---|
+| `r22689_c8230` avenue | 76.5% | 60.8% | 70.0% |
+| `r28160_c16065` junction | 77.2% | 83.4% | 82.4% |
+| `r18804_c10012` residential | 92.8% | 92.8% | 93.6% |
+| `r21686_c31355` woodland | 88.9% | 94.2% | 90.2% |
+
+- Avenue: medians are sidewalk and road (island 13% / 9% of its pixels); the lane structure is cleaner, but the
+  bicycle parking gets a straight-edged rectangle of "other", the same window artefact as in 09.
+- Junction and woodland improve, so the reference blocks don't point one way; the test mIoU is level with 08.

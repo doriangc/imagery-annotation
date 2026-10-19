@@ -156,6 +156,40 @@ at inference time only imagery is available, no BGT.
   ImageNet ResNet-34 encodes it; its two deepest feature maps are resampled to the window's part and added to the
   U-Net's two deepest levels through zero-initialised 1x1 convolutions, so training starts as the plain U-Net.
   Aimed at the avenue medians (`r22689_c8230`), which only make sense with the whole street profile in view.
+  Result (`data/unet_context.pt`, otherwise identical to `unet_multi_v2.pt`; 3 h 33 min on an A4000 vs 2 h 23 min,
+  46M parameters vs 24M):
+
+  | | val mIoU | Amersfoort mIoU | road | parking | landscaping | traffic island (val / test) |
+  |---|---|---|---|---|---|---|
+  | `unet_multi_v2.pt` | 0.563 | 0.544 | 0.68 | 0.46 | 0.67 | 0.38 / 0.52 |
+  | + context view | 0.567 | 0.549 | 0.70 | 0.51 | 0.64 | 0.34 / 0.53 |
+
+  - +0.004 / +0.005 mIoU: within noise. Parking +0.05 and road +0.02 on Amersfoort, landscaping −0.035.
+  - The branch is used (the fusion weights grew well away from zero), but it does not fix the avenue: medians
+    become sidewalk instead of road, and two reference blocks get worse (avenue 76.5% → 61.1%, woodland
+    88.9% → 76.2%, with window-shaped patches).
+  - Not adopted: 50% more training time for no clear gain. The code stays, off by default.
+- **Avenue medians, label check** (`results/10_median_labels/`): training towns label real medians as traffic
+  island too, so it isn't a convention difference. Amersfoort's tree-lined medians between carriageway and parking
+  look like what other towns call sidewalk (trees in pits next to parking), and that design is rare in training.
+  More variety (towns with boulevards) is the likely fix; the model and labels are not obviously at fault.
+- **ConvNeXt encoders** (`overnight.sh`, `data/unet_convnext_tiny.pt`, `data/unet_convnext_small.pt`): the
+  `unet_multi_v2.pt` setup with `--encoder tu-convnext_tiny` / `tu-convnext_small` (ImageNet-22k pretrained,
+  fine-tuned on 1k), all else equal. No TTA in the table.
+
+  | encoder | parameters | time (A4000) | val mIoU | Amersfoort mIoU | road | bike lane | parking | traffic island (val / test) |
+  |---|---|---|---|---|---|---|---|---|
+  | ResNet-34 (`unet_multi_v2.pt`) | 24M | 2 h 23 min | 0.563 | 0.544 | 0.68 | 0.60 | 0.46 | 0.38 / 0.52 |
+  | ConvNeXt-Tiny | 32M | 3 h 32 min | 0.576 | 0.550 | 0.69 | 0.61 | 0.48 | 0.40 / 0.53 |
+  | ConvNeXt-Small | 54M | 5 h 03 min | 0.582 | 0.546 | 0.68 | 0.57 | 0.48 | 0.40 / 0.49 |
+
+  - Validation +0.013 / +0.019, possibly real but on towns the model has seen. On Amersfoort +0.006 / +0.002,
+    within the noise between runs.
+  - Reference blocks (`results/11_*`, `results/12_*`) are not better: the avenue drops to 60.8% / 70.0% (76.5%),
+    with the medians almost entirely sidewalk, and both show a straight-edged rectangle of "other" over the
+    bicycle parking, like the context view did.
+  - Not adopted: 1.5x / 2.1x the training time for no gain on the unseen town. ResNet-34 stays the encoder, which
+    also keeps runs short for adding towns.
 
 ## Next steps
 
@@ -172,7 +206,8 @@ Broader steps:
 1. ~~**Imagery as input**~~ Done: 256 px input, 128 px target.
 2. ~~**90° rotations and flips**~~ Done (all 8, on by default). A run with `--no-augment` for comparison is
    still open; rotation removes the consistent shadow direction.
-3. **Pretrained encoder.** ImageNet ResNet-34 done; see the encoder section below for what's next.
+3. **Pretrained encoder.** ImageNet ResNet-34 done; ConvNeXt-Tiny/Small tried, no better on Amersfoort. See
+   the encoder section below for what's next.
 4. ~~**A second town as a test set**~~ Done: Amersfoort, held out entirely.
 5. ~~**More towns for training.**~~ Done: six training towns, 0.191 → 0.479 mIoU on an unseen town.
 6. **Rare classes.** Slight weighting (power 0.25) is on. Stairs are still never predicted; oversampling
