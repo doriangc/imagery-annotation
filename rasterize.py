@@ -21,7 +21,9 @@ CRS = "EPSG:28992"
 TILE = 300  # px per side when burning (30 m at 10 cm); bounds peak memory
 PREVIEW_STEP = 20  # 2 m/px preview; must divide TILE
 IGNORE = 255  # pixels left out of training and scoring, e.g. fietsstraten, which municipalities label inconsistently
-BIKE_STREET_MIN_OVERLAP_M = 3.0  # road polygons a fietsstraat runs along for at least this long are ignored
+BIKE_STREET_MIN_OVERLAP_M = 3.0  # road polygons a fietsstraat runs along for at least this long are ignored,
+BIKE_STREET_MIN_OVERLAP_SHARE = 0.3  # and for at least this share of their length (half the perimeter), so roads
+                                     # a fietsstraat only crosses, e.g. at a junction or its end, keep their label
 
 # id: (name, preview RGB)
 CLASSES = {
@@ -105,8 +107,10 @@ def load(path: str, bike_street_lines: list | None = None) -> tuple[np.ndarray, 
         line_idx, road_idx = shapely.STRtree(geoms[roads]).query(lines, predicate="intersects")
         overlap = np.zeros(len(roads))
         np.add.at(overlap, road_idx, shapely.length(shapely.intersection(lines[line_idx], geoms[roads][road_idx])))
-        class_ids[roads[overlap >= BIKE_STREET_MIN_OVERLAP_M]] = IGNORE
-        print(f"{len(lines)} OSM fietsstraten -> {(overlap >= BIKE_STREET_MIN_OVERLAP_M).sum()} road polygons ignored")
+        length = shapely.length(shapely.boundary(geoms[roads])) / 2
+        bike_street = (overlap >= BIKE_STREET_MIN_OVERLAP_M) & (overlap >= BIKE_STREET_MIN_OVERLAP_SHARE * length)
+        class_ids[roads[bike_street]] = IGNORE
+        print(f"{len(lines)} OSM fietsstraten -> {bike_street.sum()} road polygons ignored")
     return geoms, class_ids
 
 

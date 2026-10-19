@@ -199,6 +199,30 @@ at inference time only imagery is available, no BGT.
   from position (paved strip between carriageways). Planted islands stay landscaping. For comparison with
   earlier models, `--evaluate ... --merge traffic_island=sidewalk` scores an old checkpoint the same way, on
   the old labels.
+  Baseline, `unet_multi_v2.pt` on Amersfoort: mIoU 0.544 → **0.548** merged (10 classes instead of 11);
+  sidewalk 0.486 → 0.495 with the islands counted in. The next run is compared against 0.548.
+- **Boulevard run** (`data/unet_boulevards.pt`): v2 setup on nine towns with the merged labels, 50,000 steps,
+  1 h 27 min on a B300 MIG slice (18 SMs; `nvidia-smi` shows no utilization for MIG slices).
+
+  | Amersfoort | mIoU | road | bike lane | sidewalk | parking | landscaping | speed bump | rail |
+  |---|---|---|---|---|---|---|---|---|
+  | `unet_multi_v2.pt`, merged scoring | 0.548 | 0.68 | 0.60 | 0.50 | 0.46 | 0.67 | 0.42 | 0.81 |
+  | `unet_boulevards.pt` | **0.559** | 0.70 | 0.60 | 0.50 | 0.44 | 0.67 | 0.47 | 0.85 |
+
+  - +0.011 on the unseen town, from road, speed bump and rail; sidewalk unchanged. Levelled off (45k: 0.558).
+  - Houten validation drops (≈0.66 → 0.59): a smaller share of training, and the most suburban town.
+  - Reference blocks (`results/13_unet_boulevards/`): avenue 82.7% → 80.0%, other three up 0.4–4.6 points.
+    The avenue's carriageways are cleaner, but one median is still road.
+  - The straight-edged "other" blocks on the avenue's bicycle parking (also in 09, 11, 12) lie exactly on the
+    window grid (rows 64/128/192 at stride 64, 128 at stride 128): stitching is fine, but the model's answer there
+    depends on what each window happens to contain. Fed 768 px windows at prediction time (same weights), the
+    blocks mostly disappear and the avenue goes 80.2% → 82.0%; the other three reference blocks are flat
+    (88.4/88.4, 92.8/92.7, 92.8/91.9). So the model is short of context in places, and was never trained to use more.
+- **Fietsstraat ignore fix** (`rasterize.py`): a road polygon was ignored when any OSM fietsstraat ran through it
+  for 3 m, so roads a fietsstraat only crosses (junctions, bridges, its end) were ignored too, e.g. the main road
+  of junction `r28160_c16065`. Now the overlap must also be at least 0.3 of the polygon's length (half its
+  perimeter). Checked on photos: below 0.3 mostly crossings; 0.3–0.5 mostly short pieces of the route itself.
+  Un-ignores 0–16,000 m² per town (Nijmegen most; Amersfoort 88 → 77 polygons). Not yet in any training run.
 
 ## Next steps
 
