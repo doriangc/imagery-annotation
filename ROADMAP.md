@@ -227,6 +227,21 @@ at inference time only imagery is available, no BGT.
   bike path or service path (checked on photos in Utrecht and Amersfoort: rails visible in every sample), not the
   road surface. As road it made roads seem to run along the track (junction `r28160_c16065`). Now rail. Small:
   74 polygons in Utrecht, 19 in Amersfoort, 0 in Houten, mostly under 60 m². Not yet in any training run.
+- **512 px windows** (`data/unet_512.pt`, `--size 512`): the boulevard run with 512 px windows (41 m, 15 m of
+  context on each side of the 10 m target) instead of 384 px (31 m, 10 m). Same labels, steps and towns.
+  2 h 27 min on the B300 MIG slice (1.7× the 384 run).
+
+  | Amersfoort | mIoU | road | bike lane | sidewalk | parking | landscaping | speed bump | rail |
+  |---|---|---|---|---|---|---|---|---|
+  | `unet_boulevards.pt` (384) | 0.559 | 0.70 | 0.60 | 0.50 | 0.44 | 0.67 | 0.47 | 0.85 |
+  | `unet_512.pt` | **0.565** | 0.71 | 0.61 | 0.51 | 0.45 | 0.68 | 0.51 | 0.81 |
+
+  - +0.006 on the unseen town and +0.006 on validation (0.583 → 0.589), small but across almost every class and
+    every validation town except Amsterdam (equal). Rail drops, but rail is a few large patches in Amersfoort.
+  - Reference blocks (`results/14_unet_512/`, scored on the new labels like `13/new_labels_*`): avenue 80.0% →
+    81.6%, junction 88.9% → 89.7%, residential and woodland flat. The grid-aligned "other" block on the bicycle
+    parking shrinks to the top-left corner; the lower median is still road. At 41 m the window still doesn't
+    span the ~50 m avenue.
 
 ## Next steps
 

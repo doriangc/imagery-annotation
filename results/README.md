@@ -185,3 +185,21 @@ both are scored on the same truth. Reference blocks with `--stride 64 --tta`:
 - `new_labels_*`: the same model against Amersfoort re-rasterized with the fietsstraat fix and level crossings
   as rail (both after this run). The junction's main road is now scored (road 86% → 93%), and the track through
   the junction is rail, which this model, trained with it as road, gets 41% of.
+
+## 14_unet_512: 512 px windows
+
+Same as 13, with 512 px training windows (41 m) instead of 384 px (31 m); same 128 px target. Test mIoU 0.565
+(13: 0.559). Rendered against Amersfoort with the fietsstraat fix and level crossings as rail, so compare with
+`13_unet_boulevards/new_labels_*`:
+
+| Block | 13 | 14 |
+|---|---|---|
+| `r22689_c8230` avenue | 80.0% | 81.6% |
+| `r28160_c16065` junction | 88.9% | 89.7% |
+| `r18804_c10012` residential | 93.2% | 93.1% |
+| `r21686_c31355` woodland | 93.5% | 93.5% |
+
+- Avenue: the straight-edged "other" block on the bicycle parking shrinks to the top-left corner, and the
+  bicycle parking is mostly sidewalk. The lower median is still road; tree crowns over the lower sidewalk are
+  less often landscaping.
+- Junction: the track through the crossing is still mostly road (rail 43%); this model was trained with it as road.
