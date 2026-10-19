@@ -163,3 +163,22 @@ Reference blocks with `--stride 64 --tta`:
 - Avenue: medians are sidewalk and road (island 13% / 9% of its pixels); the lane structure is cleaner, but the
   bicycle parking gets a straight-edged rectangle of "other", the same window artefact as in 09.
 - Junction and woodland improve, so the reference blocks don't point one way; the test mIoU is level with 08.
+
+## 13_unet_boulevards: three boulevard towns, traffic islands merged into sidewalk
+
+Same as 08 (ResNet-34), trained on nine towns (+ `den_haag`, `rotterdam`, `eindhoven`) with paved traffic islands
+labelled sidewalk. Test mIoU 0.559 (08 scored the same way, `--merge traffic_island=sidewalk`: 0.548).
+`vis_*` is this model, `v2_merged_*` is 08 rendered with `--merge traffic_island=sidewalk` on the new labels, so
+both are scored on the same truth. Reference blocks with `--stride 64 --tta`:
+
+| Block | 08 merged | 13 |
+|---|---|---|
+| `r22689_c8230` avenue | 82.7% | 80.0% |
+| `r28160_c16065` junction | 88.1% | 89.2% |
+| `r18804_c10012` residential | 92.8% | 93.2% |
+| `r21686_c31355` woodland | 88.9% | 93.5% |
+
+- Avenue: the carriageways are almost all road now (road 89% → 97% of its pixels), and the upper median is a
+  clean sidewalk strip. The lower median, between the second carriageway and the parking lane, is still mostly
+  road, the bicycle parking gets a straight-edged block of "other" (as in 09, 11 and 12), and tree crowns over
+  the lower sidewalk become landscaping.

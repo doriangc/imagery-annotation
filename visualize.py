@@ -81,6 +81,8 @@ def main():
     parser.add_argument("--stride", type=int, help="step between windows (default: the model's target); "
                         "half the target overlaps windows and averages them")
     parser.add_argument("--tta", action="store_true", help="also average over the 8 rotations/flips")
+    parser.add_argument("--merge", nargs="+", default=[], metavar="FROM=TO",
+                        help="draw and score class FROM as TO, e.g. traffic_island=sidewalk for older checkpoints")
     parser.add_argument("--out", default="data/vis")
     args = parser.parse_args()
 
@@ -118,6 +120,9 @@ def main():
         truth = np.array(labels[r:r + args.extent, c:c + args.extent])
         pred = predict_block(model, imagery, r, c, args.extent, size, target, stride, args.tta,
                              context=context, context_scale=context_scale)
+        for src, dst in (pair.split("=") for pair in args.merge):
+            pred[pred == classes.index(src)] = classes.index(dst)
+            truth[truth == classes.index(src)] = classes.index(dst)
         scored = truth != IGNORE
         wrong = (pred != truth) & scored
         errors = (photo * 0.45).astype(np.uint8)
