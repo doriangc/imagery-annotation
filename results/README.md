@@ -203,3 +203,19 @@ Same as 13, with 512 px training windows (41 m) instead of 384 px (31 m); same 1
   bicycle parking is mostly sidewalk. The lower median is still road; tree crowns over the lower sidewalk are
   less often landscaping.
 - Junction: the track through the crossing is still mostly road (rail 43%); this model was trained with it as road.
+
+## 15_unet_new_labels: retrained on the fietsstraat fix and level crossings as rail
+
+Same as 14, on all ten towns re-rasterized with the new label rules. Test mIoU 0.563 (14 on the same labels:
+0.566). Reference blocks with `--stride 64 --tta`:
+
+| Block | 14 | 15 |
+|---|---|---|
+| `r22689_c8230` avenue | 81.6% | 73.8% |
+| `r28160_c16065` junction | 89.7% | 89.1% |
+| `r18804_c10012` residential | 93.1% | 93.1% |
+| `r21686_c31355` woodland | 93.5% | 93.4% |
+
+- Avenue: most of the bicycle parking is "other" (patchy, not grid-aligned), which accounts for most of the drop.
+  The lower median is partly sidewalk, which no earlier model managed.
+- Junction: the level crossing is still predicted as road (rail 41%). The rail corridor south-east of it is fine.

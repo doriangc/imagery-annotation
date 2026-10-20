@@ -242,6 +242,21 @@ at inference time only imagery is available, no BGT.
     81.6%, junction 88.9% → 89.7%, residential and woodland flat. The grid-aligned "other" block on the bicycle
     parking shrinks to the top-left corner; the lower median is still road. At 41 m the window still doesn't
     span the ~50 m avenue.
+- **New labels run** (`data/unet_new_labels.pt`): the 512 run retrained on all ten towns re-rasterized with the
+  fietsstraat fix and level crossings as rail. Baseline: `unet_512.pt` scored on the new labels, 0.589 val /
+  0.566 Amersfoort (unchanged, as the fixes touch little area).
+
+  | new labels | val mIoU | Amersfoort | road | bike lane | sidewalk | parking | speed bump | rail |
+  |---|---|---|---|---|---|---|---|---|
+  | `unet_512.pt` (old labels) | 0.589 | **0.566** | 0.71 | 0.61 | 0.51 | 0.45 | 0.51 | 0.81 |
+  | `unet_new_labels.pt` | **0.590** | 0.563 | 0.71 | 0.60 | 0.50 | 0.44 | 0.50 | 0.82 |
+
+  - A tie, within run-to-run noise. The fixes are kept because the labels are more correct, not for the score.
+  - The junction's level crossing is still road (rail 41%, same as models that never saw it as rail): too few
+    examples (~100 small polygons across ten towns), and the rails there are thin lines in asphalt.
+  - Avenue 81.6% → 73.8%: the bicycle parking is now mostly "other", in irregular patches rather than window-grid
+    blocks, and the lower median is partly sidewalk for the first time. So the avenue swings several points
+    between runs that score the same on the town; read single-block changes with that in mind.
 
 ## Next steps
 
