@@ -219,3 +219,18 @@ Same as 14, on all ten towns re-rasterized with the new label rules. Test mIoU 0
 - Avenue: most of the bicycle parking is "other" (patchy, not grid-aligned), which accounts for most of the drop.
   The lower median is partly sidewalk, which no earlier model managed.
 - Junction: the level crossing is still predicted as road (rail 41%). The rail corridor south-east of it is fine.
+
+## 16_wide_inference: 512 px models run on 768 px windows
+
+`visualize.py --size 768`: the 14 and 15 models with 768 px windows (61 m) at prediction time instead of 512,
+same weights. Files are `<checkpoint>_768_*`.
+
+| Block | 14 | 14 at 768 | 15 | 15 at 768 |
+|---|---|---|---|---|
+| `r22689_c8230` avenue | 81.6% | 82.0% | 73.8% | 76.3% |
+| `r28160_c16065` junction | 89.7% | 89.7% | 89.1% | 88.9% |
+| `r18804_c10012` residential | 93.1% | 93.1% | 93.1% | 93.0% |
+| `r21686_c31355` woodland | 93.5% | 93.3% | 93.4% | 93.1% |
+
+- Avenue: the extra context removes some of the "other" on the bicycle parking; the lower median looks the same
+  as at 512 in both models (road in 14, partly sidewalk in 15).

@@ -80,6 +80,8 @@ def main():
     parser.add_argument("--extent", type=int, default=768, help="block side in px (multiple of the model's target)")
     parser.add_argument("--stride", type=int, help="step between windows (default: the model's target); "
                         "half the target overlaps windows and averages them")
+    parser.add_argument("--size", type=int, help="window side in px at prediction time (default: the model's); "
+                                                 "larger gives each pixel more context than it was trained with")
     parser.add_argument("--tta", action="store_true", help="also average over the 8 rotations/flips")
     parser.add_argument("--merge", nargs="+", default=[], metavar="FROM=TO",
                         help="draw and score class FROM as TO, e.g. traffic_island=sidewalk for older checkpoints")
@@ -87,7 +89,9 @@ def main():
     args = parser.parse_args()
 
     model, checkpoint = load_model(args.checkpoint)
-    size, target, classes = checkpoint["size"], checkpoint["target"], checkpoint["classes"]
+    size, target, classes = args.size or checkpoint["size"], checkpoint["target"], checkpoint["classes"]
+    if (size - target) % 2:
+        parser.error("--size minus the model's target must be even")
     stride = args.stride or target
     if args.extent % target or target % stride:
         parser.error(f"--extent must be a multiple of the model's target ({target}), which --stride must divide")

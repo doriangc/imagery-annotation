@@ -257,6 +257,11 @@ at inference time only imagery is available, no BGT.
   - Avenue 81.6% → 73.8%: the bicycle parking is now mostly "other", in irregular patches rather than window-grid
     blocks, and the lower median is partly sidewalk for the first time. So the avenue swings several points
     between runs that score the same on the town; read single-block changes with that in mind.
+- **Wider windows at prediction time** (`visualize.py --size 768`, `results/16_wide_inference/`): both 512 models
+  on 768 px windows (61 m, spanning the avenue), same weights. Avenue 81.6% → 82.0% and 73.8% → 76.3%, other
+  blocks flat (±0.2). The gain is the bicycle parking: less "other". The lower median does not change in either
+  model, so seeing the whole avenue doesn't fix it. More examples of this kind of median (paved strip with trees
+  between a carriageway and a parking lane) look like the better lever than more context.
 
 ## Next steps
 
