@@ -283,6 +283,20 @@ at inference time only imagery is available, no BGT.
   64 px (5 m) context border. Evaluation windows are now scored on their central 128 px (`SCORE`) whatever the
   target, so earlier and dense runs stay comparable. `--evaluate --infer-target 128` predicts a dense model's
   central squares only, for more context per pixel.
+- **Baseline on every pixel** (`unet_new_labels.pt`, `logs/baseline_full.log` on the pod):
+
+  | | evaluation windows | every pixel |
+  |---|---|---|
+  | Amersfoort | 0.563 | **0.554** |
+  | Groningen | 0.457 | **0.451** |
+  | Houten val | 0.661 | 0.581 |
+  | val pooled | 0.590 | 0.590 |
+
+  - The windows were close for the test towns, but 0.08 off for Houten's validation strip. Per-area window
+    scores can't be trusted at that level; compare every-pixel numbers from now on.
+  - Groningen is 0.10 below Amersfoort, mostly bike lane (about 0.42 vs 0.61) and parking (about 0.32 vs 0.45).
+  - Compare per town, not the pooled test mIoU: Groningen's few farmland patches (about 0.5 ha) score 0.000 on
+    every pixel and cost the pooled mean about 0.05. Amersfoort has none.
 
 ## Next steps
 
