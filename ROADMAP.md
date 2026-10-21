@@ -297,6 +297,22 @@ at inference time only imagery is available, no BGT.
   - Groningen is 0.10 below Amersfoort, mostly bike lane (about 0.42 vs 0.61) and parking (about 0.32 vs 0.45).
   - Compare per town, not the pooled test mIoU: Groningen's few farmland patches (about 0.5 ha) score 0.000 on
     every pixel and cost the pooled mean about 0.05. Amersfoort has none.
+- **Dense supervision, seed 0** (`unet_dense_s0.pt`, `--target 384 --size 512 --ema 0.999 --seed 0`, 50,000 steps,
+  2.7 h on the MIG slice). Every pixel:
+
+  | | baseline | dense s0 |
+  |---|---|---|
+  | Amersfoort | 0.554 | **0.592** |
+  | Groningen | 0.451 | **0.479** |
+  | Houten val | 0.581 | 0.636 |
+  | val pooled | 0.590 | 0.629 |
+
+  - Every road class gains on the test towns: road 0.687 → 0.722, bike lane 0.520 → 0.570, sidewalk
+    0.511 → 0.534, parking 0.403 → 0.442, speed bump 0.436 → 0.556, rail 0.763 → 0.820. The small classes gain most.
+  - EMA adds nothing: without it, every pixel is 0.591 (Amersfoort) and 0.479 (Groningen).
+  - Groningen stays 0.11 behind Amersfoort, so the gap is not a supervision problem.
+  - Flat from 45,000 steps (Amersfoort 0.597 → 0.596 on windows).
+  - Seed 1 still to come, for the run-to-run spread.
 
 ## Next steps
 

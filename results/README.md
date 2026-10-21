@@ -234,3 +234,22 @@ same weights. Files are `<checkpoint>_768_*`.
 
 - Avenue: the extra context removes some of the "other" on the bicycle parking; the lower median looks the same
   as at 512 in both models (road in 14, partly sidewalk in 15).
+
+## 17_unet_dense: dense supervision (384 px target in a 512 px window)
+
+`unet_dense_s0.pt`: the loss covers the central 384 px of each 512 px window instead of 128 px (9x more labelled
+pixels per step). Every-pixel mIoU: Amersfoort 0.592 (15: 0.554), Groningen 0.479 (0.451). Reference blocks with
+`--stride 64 --tta`:
+
+| Block | 15 | 17 |
+|---|---|---|
+| `r22689_c8230` avenue | 73.8% | 81.0% |
+| `r28160_c16065` junction | 89.1% | 91.4% |
+| `r18804_c10012` residential | 93.1% | 93.8% |
+| `r21686_c31355` woodland | 93.4% | 94.6% |
+
+- Avenue: straighter edges and fewer blobs. The upper median is cleanly sidewalk and the bicycle parking mostly
+  sidewalk ("other" only at the right edge). The lower median is still road. The car row along the top carriageway
+  (road in BGT) is partly predicted as parking.
+- Junction: the level crossing is still mostly road (rail 43%).
+
