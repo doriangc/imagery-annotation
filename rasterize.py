@@ -24,6 +24,8 @@ IGNORE = 255  # pixels left out of training and scoring, e.g. fietsstraten, whic
 BIKE_STREET_MIN_OVERLAP_M = 3.0  # road polygons a fietsstraat runs along for at least this long are ignored,
 BIKE_STREET_MIN_OVERLAP_SHARE = 0.3  # and for at least this share of their length (half the perimeter), so roads
                                      # a fietsstraat only crosses, e.g. at a junction or its end, keep their label
+SPEED_BUMP_MAX_M2 = 1500  # larger "speed bumps" are whole road stretches (two in Groningen, 5,757 and 1,811 m²;
+                          # none in the other towns), so they are ignored rather than taught as speed bump
 
 # id: (name, preview RGB)
 CLASSES = {
@@ -53,6 +55,7 @@ WEGDEEL_FUNCTIE = {
     "rijbaan lokale weg": "road",
     "rijbaan regionale weg": "road",
     "rijbaan autosnelweg": "road",
+    "rijbaan autoweg": "road",  # expressways (ring roads); Nijmegen 0.9%, Groningen 3.6% of road surface
     "woonerf": "road",
     "OV-baan": "road",
     "fietspad": "bike_lane",
@@ -100,6 +103,10 @@ def load(path: str, bike_street_lines: list | None = None) -> tuple[np.ndarray, 
     project = lambda g: shapely.transform(g, lambda xy: np.column_stack(to_rd.transform(xy[:, 0], xy[:, 1])))
     geoms = project(shapely.from_geojson([json.dumps(r[1]) for r in rows]))
     class_ids = np.array([r[2] for r in rows], dtype=np.uint8)
+    huge_bumps = (class_ids == CLASS_ID["speed_bump"]) & (shapely.area(geoms) > SPEED_BUMP_MAX_M2)
+    class_ids[huge_bumps] = IGNORE
+    if huge_bumps.any():
+        print(f"{huge_bumps.sum()} speed bump polygons over {SPEED_BUMP_MAX_M2} m² ignored")
 
     if bike_street_lines:
         roads = np.flatnonzero([r[3] == "wegdeel" for r in rows])

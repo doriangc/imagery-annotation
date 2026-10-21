@@ -5,8 +5,12 @@ Two inputs:
 - labels: the class raster itself with the target square hidden, so the model has to infer it from context.
   This was the first step for setting up the code, and stays as a regression test with a copy-left baseline.
 
-The model predicts every pixel, but only the target square is scored: its pixels all have at least
-`(size - target) / 2` px of context on every side, which should cover the model's receptive field.
+The model predicts every pixel, but only the target square is trained on: its pixels all have at least
+`(size - target) / 2` px of context on every side. A large target (e.g. 384 in a 512 window) supervises most of
+the window, at the cost of less context near its edge. Evaluation windows are scored on their central SCORE px
+whatever the target, so runs with different targets stay comparable; --full-eval also scores every pixel of
+the validation strips and test areas, tiled with the model's target squares.
+With --ema, evaluation and the saved checkpoint use an exponential moving average of the weights.
 Training windows get a random 90° rotation and flip, and with --lighting random lighting changes and shadows;
 validation windows stay as they are.
 Runs on a GPU when one is available, with windows sampled by DataLoader worker processes.
@@ -33,6 +37,7 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 VAL_FRACTION = 0.15  # the southern strip of the raster is held out
 IGNORE = 255  # label of pixels left out of the loss and scores (rasterize.IGNORE)
 MAX_SIZE = 512  # largest supported window; centres keep this margin, so every size scores the same target squares
+SCORE = 128  # side of the central square evaluation windows are scored on (the target, if smaller)
 DEFAULTS = {"imagery": (256, 128), "labels": (160, 32)}  # (size, target) per input
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)  # so pretrained encoders can drop in later
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
@@ -170,7 +175,7 @@ class TrainStream(IterableDataset):
 
     def __iter__(self):
         info = get_worker_info()
-        seed = self.seed + (info.id if info else 0)
+        seed = 10_000 * self.seed + (info.id if info else 0)  # seeds 0 and 1 share no worker streams
         areas = [Windows(labels, imagery, "train", self.size, seed=seed + 100 * i, context_scale=self.context_scale)
                  for i, (labels, imagery) in enumerate(self.sources)]
         p = np.array([a.num_centres for a in areas], dtype=float)
@@ -362,10 +367,12 @@ def evaluate(model, val_batches, num_classes, target, input_kind, device, memory
     confusion = {name: torch.zeros(num_classes, num_classes, dtype=torch.long, device=device) for name in names}
     dtype = amp_dtype(device)
     with torch.no_grad(), torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
+        s = target_slice(target, min(target, SCORE))  # the scored square inside the target square
         for labels, images in val_batches:
             x, y = encode(labels, images, num_classes, target, input_kind, device, memory_format)
             t = target_slice(labels.shape[-1], target)
-            preds = {"model": model(x).argmax(1)}
+            y = y[:, s, s]
+            preds = {"model": model(x).argmax(1)[:, s, s]}
             if input_kind == "labels":
                 preds["copy_left"] = labels[:, t, t.start - 1:t.start].expand(-1, -1, target).to(device)
             scored = y != IGNORE
@@ -392,6 +399,62 @@ def evaluate_groups(model, groups, num_classes, target, input_kind, device, memo
             for name, c in confusion.items():
                 key = group if name == "model" else f"{group} {name}"
                 pooled[key] = pooled.get(key, 0) + c
+    return {key: summarize(c) for key, c in pooled.items()}, per_area
+
+
+def tiles(lo: int, hi: int, target: int) -> list[tuple[int, int]]:
+    """(start, skip) per target square covering [lo, hi): the last square is pulled back to end at hi, and
+    `skip` is how much of it the previous square already covered."""
+    starts = list(range(lo, hi - target + 1, target))
+    if starts[-1] + target < hi:
+        starts.append(hi - target)
+    return [(b, a + target - b if i else 0) for i, (a, b) in enumerate(zip([lo] + starts, starts))]
+
+
+def score_region(model, imagery_path: str, labels_path: str, rows: tuple[int, int], cols: tuple[int, int],
+                 size: int, target: int, num_classes: int, device, batch: int = 32,
+                 memory_format=torch.contiguous_format) -> torch.Tensor:
+    """Confusion matrix over every pixel of labels[rows, cols], each predicted once, by the window around the
+    target square that contains it. Needs (size - target) / 2 px of imagery around the region."""
+    imagery, labels = np.load(imagery_path, mmap_mode="r"), np.load(labels_path, mmap_mode="r")
+    margin, (c0, c1) = (size - target) // 2, cols
+    confusion = torch.zeros(num_classes * num_classes, dtype=torch.long, device=device)
+    dtype = amp_dtype(device)
+    model.eval()
+    with torch.no_grad(), torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
+        for r, row_skip in tiles(*rows, target):
+            strip = torch.from_numpy(np.array(imagery[r - margin:r + target + margin, c0 - margin:c1 + margin])).to(device)
+            pred = torch.empty(target, c1 - c0, dtype=torch.long, device=device)
+            col_tiles = tiles(c0, c1, target)
+            for i in range(0, len(col_tiles), batch):
+                chunk = col_tiles[i:i + batch]
+                windows = torch.stack([strip[:, c - c0:c - c0 + size] for c, _ in chunk])
+                out = model(encode_imagery(windows).contiguous(memory_format=memory_format)).argmax(1)
+                for (c, skip), square in zip(chunk, out):
+                    pred[:, c + skip - c0:c + target - c0] = square[:, skip:]
+            truth = torch.from_numpy(np.array(labels[r + row_skip:r + target, c0:c1])).to(device).long()
+            pred, scored = pred[row_skip:], truth != IGNORE
+            confusion += torch.bincount(truth[scored] * num_classes + pred[scored], minlength=num_classes ** 2)
+    model.train()
+    return confusion.view(num_classes, num_classes).cpu()
+
+
+def score_groups_full(model, areas: dict, size: int, target: int, num_classes: int, device,
+                      memory_format=torch.contiguous_format, merges=()):
+    """Like evaluate_groups, but over every pixel: the validation strip of each training area and the whole of
+    each test area, less a MAX_SIZE / 2 border, the same region the evaluation windows are centred in.
+    `areas` = {"val"/"test": {area: (labels_path, imagery_path)}}."""
+    pooled, per_area = {}, {}
+    for group, paths in areas.items():
+        for area, (labels_path, imagery_path) in paths.items():
+            height, width = np.load(labels_path, mmap_mode="r").shape
+            top = int(height * (1 - VAL_FRACTION)) if group == "val" else 0
+            rows, cols = (top + MAX_SIZE // 2, height - MAX_SIZE // 2), (MAX_SIZE // 2, width - MAX_SIZE // 2)
+            c = score_region(model, imagery_path, labels_path, rows, cols, size, target, num_classes, device,
+                             memory_format=memory_format)
+            c = merge_classes(c, merges)
+            per_area[f"{area} {group}"] = summarize(c)["miou"]
+            pooled[group] = pooled.get(group, 0) + c
     return {key: summarize(c) for key, c in pooled.items()}, per_area
 
 
@@ -439,11 +502,23 @@ def main():
                         help="with --evaluate: average predictions over the 8 rotations/flips (8x slower)")
     parser.add_argument("--merge", nargs="+", default=[], metavar="FROM=TO",
                         help="with --evaluate: score class FROM as TO, e.g. traffic_island=sidewalk")
+    parser.add_argument("--ema", type=float, default=0.0, metavar="DECAY",
+                        help="evaluate and save an exponential moving average of the weights, e.g. 0.9995 "
+                             "(about the last 2,000 steps); 0 = off")
+    parser.add_argument("--full-eval", action="store_true",
+                        help="after training (or with --evaluate), also score every pixel of the validation strips "
+                             "and test areas; imagery input without a context view only")
+    parser.add_argument("--infer-target", type=int,
+                        help="with --evaluate: predict this central square per window instead of the checkpoint's "
+                             "target (smaller = more context per pixel, more windows)")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="initialisation and training windows; validation windows stay fixed whatever the seed")
     parser.add_argument("--out", default="data/center_patch.pt")
     args = parser.parse_args()
     if args.evaluate:
         checkpoint = torch.load(args.evaluate, map_location="cpu")
         args.input, args.size, args.target = checkpoint["input"], checkpoint["size"], checkpoint["target"]
+        args.target = args.infer_target or args.target
         args.context_scale = checkpoint.get("context_scale", 0)
     args.size = args.size or DEFAULTS[args.input][0]
     args.target = args.target or DEFAULTS[args.input][1]
@@ -452,6 +527,8 @@ def main():
 
     if args.context_scale and (args.input != "imagery" or args.model != "unet" and not args.evaluate):
         parser.error("--context-scale needs imagery input and the U-Net")
+    if args.full_eval and (args.input != "imagery" or args.context_scale):
+        parser.error("--full-eval needs imagery input without a context view")
     overlap = set(args.areas) & set(args.test_areas)
     if overlap:
         parser.error(f"areas can't be both training and test: {', '.join(sorted(overlap))}")
@@ -472,7 +549,7 @@ def main():
                 print(f"building the {args.context_scale}x context imagery for {area}", flush=True)
                 build_context(imagery_path(area), args.context_scale)
 
-    torch.manual_seed(0)
+    torch.manual_seed(args.seed)
     device = torch.device(args.device)
     cuda = device.type == "cuda"
     if cuda:
@@ -483,9 +560,12 @@ def main():
             windows = Windows(f"{labels_path(area)}.npy", imagery_path(area), split, args.size, seed=1,
                               context_scale=args.context_scale)
             groups.setdefault(group, {})[area] = [windows.batch(args.batch) for _ in range(args.val_batches)]
+    full_areas = {group: {a: (f"{labels_path(a)}.npy", imagery_path(a)) for a in areas}
+                  for group, areas in (("val", args.areas), ("test", args.test_areas)) if areas}
 
     if args.evaluate:
         model, _ = load_model(args.evaluate, device)
+        model.target = args.target
         if args.tta:
             model = FlipRotateAverage(model)
         merges = [tuple(class_names.index(name) for name in pair.split("=")) for pair in args.merge]
@@ -493,10 +573,16 @@ def main():
                                               merges=merges)
         print(f"{args.evaluate}: {report(summaries, per_area)}")
         print_table(summaries, class_names)
+        if args.full_eval:
+            summaries, per_area = score_groups_full(model, full_areas, args.size, args.target, num_classes, device,
+                                                    merges=merges)
+            print(f"{args.evaluate}, every pixel: {report(summaries, per_area)}")
+            print_table(summaries, class_names)
         return
     train = DataLoader(
         TrainStream([(f"{labels_path(a)}.npy", imagery_path(a)) for a in args.areas], args.size,
-                    augment=not args.no_augment, lighting=args.lighting, context_scale=args.context_scale),
+                    augment=not args.no_augment, lighting=args.lighting, context_scale=args.context_scale,
+                    seed=args.seed),
         batch_size=args.batch, num_workers=args.workers, pin_memory=cuda,
         persistent_workers=args.workers > 0, prefetch_factor=2 if args.workers > 0 else None,  # batches sit in /dev/shm
     )
@@ -512,6 +598,12 @@ def main():
     memory_format = torch.channels_last if args.channels_last else torch.contiguous_format
     model = model.to(memory_format=memory_format)
     run_model = torch.compile(model) if args.compile else model  # `model` keeps clean state_dict keys for saving
+    ema, eval_model, run_eval_model = None, model, run_model  # what is evaluated and saved
+    if args.ema:  # BatchNorm statistics are averaged too, so the averaged model needs no recalibration
+        ema = torch.optim.swa_utils.AveragedModel(model, use_buffers=True,
+                                                  multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(args.ema))
+        eval_model = ema.module
+        run_eval_model = torch.compile(eval_model) if args.compile else eval_model
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, args.lr, total_steps=args.steps)
     pixel_counts = [sum(raster_meta[a]["pixel_counts"][name] for a in args.areas) for name in class_names]
@@ -528,7 +620,7 @@ def main():
     meta = {"classes": class_names, "input": args.input, "model_kind": args.model,
             "encoder": args.encoder if args.model == "unet" else None, "size": args.size, "target": args.target,
             "class_weight_power": args.class_weight_power, "lighting": args.lighting,
-            "context_scale": args.context_scale,
+            "context_scale": args.context_scale, "ema": args.ema, "seed": args.seed,
             "areas": args.areas, "test_areas": args.test_areas}
     start = time.time()
     for step, (labels, images) in enumerate(train, start=1):
@@ -540,18 +632,34 @@ def main():
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
+        if ema:
+            ema.update_parameters(model)
 
         if step % args.eval_every == 0 or step == args.steps:
-            summaries, per_area = evaluate_groups(run_model, groups, num_classes, args.target, args.input, device,
-                                                  memory_format)
+            summaries, per_area = evaluate_groups(run_eval_model, groups, num_classes, args.target, args.input,
+                                                  device, memory_format)
             print(f"step {step:5d}  loss {loss.item():.3f}  {report(summaries, per_area)}  "
                   f"{time.time() - start:.0f}s", flush=True)
-            torch.save({**meta, "model": model.state_dict(), "step": step, "val_miou": summaries["val"]["miou"],
+            torch.save({**meta, "model": eval_model.state_dict(), "step": step, "val_miou": summaries["val"]["miou"],
                         "test_miou": summaries["test"]["miou"] if "test" in summaries else None}, args.out)
         if step == args.steps:
             break
 
+    if ema:  # the raw weights at the end, for comparison
+        raw, raw_per_area = evaluate_groups(run_model, groups, num_classes, args.target, args.input, device,
+                                            memory_format)
+        print(f"without EMA: {report(raw, raw_per_area)}", flush=True)
     print_table(summaries, class_names)
+    if args.full_eval:
+        start = time.time()
+        summaries, per_area = score_groups_full(run_eval_model, full_areas, args.size, args.target, num_classes,
+                                                device, memory_format)
+        print(f"every pixel: {report(summaries, per_area)}  {time.time() - start:.0f}s", flush=True)
+        print_table(summaries, class_names)
+        if ema:
+            raw, raw_per_area = score_groups_full(run_model, full_areas, args.size, args.target, num_classes,
+                                                  device, memory_format)
+            print(f"every pixel, without EMA: {report(raw, raw_per_area)}", flush=True)
 
 
 if __name__ == "__main__":

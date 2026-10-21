@@ -262,6 +262,27 @@ at inference time only imagery is available, no BGT.
   blocks flat (±0.2). The gain is the bicycle parking: less "other". The lower median does not change in either
   model, so seeing the whole avenue doesn't fix it. More examples of this kind of median (paved strip with trees
   between a carriageway and a parking lane) look like the better lever than more context.
+- **Review** (October 21): a written review of the next steps is kept as a doc, "bgt-fit model review". Its plan:
+  measurement first, then dense supervision, then loss and learning-rate tuning, targeted sampling, infrared and
+  AHN inputs, and cross-section aggregation along the road.
+- **Measurement** (`center_patch.py`):
+  - `--full-eval` scores every pixel of the validation strips and test areas (less a 256 px border), tiled with
+    the model's target squares, after training or with `--evaluate`. The 1,600 evaluation windows per area cover
+    about 2% of a town.
+  - `--ema DECAY` evaluates and saves an exponential moving average of the weights; the raw weights are scored
+    once more at the end for comparison.
+  - `--seed` for repeat runs. Validation windows stay fixed whatever the seed.
+  - `groningen` added to `areas.py` as a second test town, unlike Amersfoort. Its BGT is consistent with the
+    others (`results/label_consistency.md`), apart from two fixes in `rasterize.py` that apply to every town:
+    - `rijbaan autoweg` (expressway carriageway) is now road. It was unmapped, so it rasterized as "other":
+      0.1% of road surface in Amsterdam, 0.9% in Nijmegen, 3.6% in Groningen.
+    - Speed bump polygons over 1,500 m² are ignored: two in Groningen (5,757 and 1,811 m², whole road stretches),
+      none elsewhere.
+- **Dense supervision**: the loss used only the central 128 px of each window (6% of a 512 px window), a leftover
+  from the label-inpainting setup. `--target 384` with `--size 512` supervises 9x more pixels per step with a
+  64 px (5 m) context border. Evaluation windows are now scored on their central 128 px (`SCORE`) whatever the
+  target, so earlier and dense runs stay comparable. `--evaluate --infer-target 128` predicts a dense model's
+  central squares only, for more context per pixel.
 
 ## Next steps
 

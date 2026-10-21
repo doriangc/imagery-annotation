@@ -14,4 +14,6 @@ AREAS = {
     "den_haag": (4.276, 52.070, 4.320, 52.097),  # Koningskade, Zeestraat, east end of Laan van Meerdervoort
     "rotterdam": (4.455, 51.907, 4.499, 51.934),  # Coolsingel, Weena, Westersingel, Blaak
     "eindhoven": (5.465, 51.440, 5.509, 51.467),  # Kennedylaan, Fuutlaan, ring road
+    # second test town, unlike Amersfoort: northern, compact old centre inside the diepen, heavy cycling network
+    "groningen": (6.545, 53.204, 6.589, 53.231),
 }
