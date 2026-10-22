@@ -241,15 +241,21 @@ same weights. Files are `<checkpoint>_768_*`.
 pixels per step). Every-pixel mIoU: Amersfoort 0.592 (15: 0.554), Groningen 0.479 (0.451). Reference blocks with
 `--stride 64 --tta`:
 
-| Block | 15 | 17 |
-|---|---|---|
-| `r22689_c8230` avenue | 73.8% | 81.0% |
-| `r28160_c16065` junction | 89.1% | 91.4% |
-| `r18804_c10012` residential | 93.1% | 93.8% |
-| `r21686_c31355` woodland | 93.4% | 94.6% |
+| Block | 15 | 17 seed 0 | 17 seed 1 |
+|---|---|---|---|
+| `r22689_c8230` avenue | 73.8% | 81.0% | 67.7% |
+| `r28160_c16065` junction | 89.1% | 91.4% | 91.5% |
+| `r18804_c10012` residential | 93.1% | 93.8% | 93.7% |
+| `r21686_c31355` woodland | 93.4% | 94.6% | 94.7% |
+
+Seed 1 (`unet_dense_s1.pt`, files `s1_*`) scores the same as seed 0 on every pixel of both test towns.
 
 - Avenue: straighter edges and fewer blobs. The upper median is cleanly sidewalk and the bicycle parking mostly
   sidewalk ("other" only at the right edge). The lower median is still road. The car row along the top carriageway
   (road in BGT) is partly predicted as parking.
 - Junction: the level crossing is still mostly road (rail 43%).
+- Seed 1's avenue: the bicycle parking is mostly "other" with patches of parking, which accounts for the whole
+  13-point gap to seed 0. The carriageways and medians look the same in both, with the lower median still road.
+  The bicycle parking alone swings the avenue by over 10 points between equal runs, so read the avenue's score
+  with that in mind and look at the medians in the image.
 
