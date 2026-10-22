@@ -37,7 +37,7 @@ import shapely  # noqa: E402
 from PIL import Image  # noqa: E402
 from rasterio.features import rasterize  # noqa: E402
 from rasterio.transform import from_origin  # noqa: E402
-from rasterio.warp import Resampling, reproject, transform_bounds  # noqa: E402
+from rasterio.warp import Resampling, reproject, transform_bounds, transform_geom  # noqa: E402
 from rasterio.windows import Window, from_bounds  # noqa: E402
 
 from areas import US_AREAS, area_dir  # noqa: E402
@@ -244,11 +244,16 @@ def label_shapes(area: str, bbox: tuple, crs: int) -> tuple[list, list]:
     source, _, _, year = US_AREAS[area]
     client = httpx.Client(timeout=300)
     if source == "denver":
-        features = query(client, DRCOG_ROADS.format(year=year), bbox, crs, fields="OBJECTID,Type")
+        # Fetched in their own CRS (the photos' too) and projected here like the photos: the server's
+        # NAD83 -> WGS84 step differs from PROJ's, which put the labels ~1.1 m north-west of the photos
+        native = transform_bounds(f"EPSG:{crs}", DRAPP_CRS, *bbox)
+        features = query(client, DRCOG_ROADS.format(year=year), native, int(DRAPP_CRS.split(":")[1]),
+                         fields="OBJECTID,Type")
         types = [f["properties"]["Type"] for f in features]
         print(f"  DRCOG {year}: " + ", ".join(f"{t} {types.count(t)}" for t in sorted(set(types), key=str)))
-        shapes = [(f["geometry"], 1) for f, t in zip(features, types) if t == "Corridor"]
-        shapes += [(f["geometry"], 0) for f, t in zip(features, types) if t == "Median"]  # medians sit on corridors
+        geoms = [transform_geom(DRAPP_CRS, f"EPSG:{crs}", f["geometry"]) for f in features]
+        shapes = [(g, 1) for g, t in zip(geoms, types) if t == "Corridor"]
+        shapes += [(g, 0) for g, t in zip(geoms, types) if t == "Median"]  # medians sit on corridors
         return shapes, []
     base = DC_PLANIMETRICS.format(year=year)
     shapes = []
