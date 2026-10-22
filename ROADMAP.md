@@ -297,7 +297,7 @@ at inference time only imagery is available, no BGT.
   - Groningen is 0.10 below Amersfoort, mostly bike lane (about 0.42 vs 0.61) and parking (about 0.32 vs 0.45).
   - Compare per town, not the pooled test mIoU: Groningen's few farmland patches (about 0.5 ha) score 0.000 on
     every pixel and cost the pooled mean about 0.05. Amersfoort has none.
-- **Dense supervision, seed 0** (`unet_dense_s0.pt`, `--target 384 --size 512 --ema 0.999 --seed 0`, 50,000 steps,
+- **Dense supervision, seed 0** (`unet_dense_s0.pt`, `--target 384 --size 512 --ema 0.9995 --seed 0`, 50,000 steps,
   2.7 h on the MIG slice). Every pixel:
 
   | | baseline | dense s0 |
@@ -312,7 +312,13 @@ at inference time only imagery is available, no BGT.
   - EMA adds nothing: without it, every pixel is 0.591 (Amersfoort) and 0.479 (Groningen).
   - Groningen stays 0.11 behind Amersfoort, so the gap is not a supervision problem.
   - Flat from 45,000 steps (Amersfoort 0.597 → 0.596 on windows).
-  - Seed 1 still to come, for the run-to-run spread.
+  - Seed 1 (`unet_dense_s1.pt`) on every pixel: Amersfoort 0.592, Groningen 0.479, val pooled 0.627, so within
+    0.002 of seed 0. On the windows the two seeds' Amersfoort scores were 0.596 and 0.607. Every-pixel scores per
+    test town are precise enough to compare single runs from here on; single validation areas still differ by
+    about 0.01 between seeds (Houten 0.636 vs 0.646).
+- **Loss and learning rate** (`center_patch.py`): `--lovasz WEIGHT` adds the Lovász-softmax loss (Berman et al.
+  2018), a surrogate of IoU, to the cross-entropy; `--encoder-lr-scale S` trains the pretrained encoder (21.3M of
+  the 24.4M parameters) at S times the learning rate. Tested separately on top of the dense setup, without EMA.
 
 ## Next steps
 

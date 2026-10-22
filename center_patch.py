@@ -10,6 +10,8 @@ The model predicts every pixel, but only the target square is trained on: its pi
 the window, at the cost of less context near its edge. Evaluation windows are scored on their central SCORE px
 whatever the target, so runs with different targets stay comparable; --full-eval also scores every pixel of
 the validation strips and test areas, tiled with the model's target squares.
+With --lovasz, the Lovász-softmax loss (an IoU surrogate) is added to the cross-entropy, and --encoder-lr-scale
+trains the pretrained encoder at a fraction of the learning rate.
 With --ema, evaluation and the saved checkpoint use an exponential moving average of the weights.
 Training windows get a random 90° rotation and flip, and with --lighting random lighting changes and shadows;
 validation windows stay as they are.
@@ -326,6 +328,26 @@ def class_weights(pixel_counts: list[int], power: float) -> torch.Tensor:
     return weights.float()
 
 
+def lovasz_softmax(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Lovász-softmax loss (Berman et al. 2018): a convex surrogate of 1 - IoU, averaged over the classes present
+    in the batch. Pixels labelled IGNORE are left out."""
+    probs = logits.float().softmax(1).permute(0, 2, 3, 1).reshape(-1, logits.shape[1])
+    labels = labels.reshape(-1)
+    keep = labels != IGNORE
+    probs, labels = probs[keep], labels[keep]
+    losses = []
+    for c in labels.unique().tolist():
+        truth = (labels == c).float()
+        errors, order = (truth - probs[:, c]).abs().sort(descending=True)
+        truth = truth[order]
+        intersection = truth.sum() - truth.cumsum(0)
+        union = truth.sum() + (1 - truth).cumsum(0)
+        jaccard = 1 - intersection / union
+        jaccard[1:] = jaccard[1:] - jaccard[:-1]  # gradient of the Lovász extension
+        losses.append(errors @ jaccard)
+    return torch.stack(losses).mean() if losses else logits.sum() * 0
+
+
 def print_table(columns: dict, class_names: list[str]):
     """Per-class IoU, one column per {name: summarize() result}."""
     print(f"\n{'class':<16}" + "".join(f"{name:>12}" for name in columns))
@@ -511,6 +533,10 @@ def main():
     parser.add_argument("--infer-target", type=int,
                         help="with --evaluate: predict this central square per window instead of the checkpoint's "
                              "target (smaller = more context per pixel, more windows)")
+    parser.add_argument("--lovasz", type=float, default=0.0, metavar="WEIGHT",
+                        help="add the Lovász-softmax loss (an IoU surrogate) with this weight to cross-entropy; 0 = off")
+    parser.add_argument("--encoder-lr-scale", type=float, default=1.0,
+                        help="learning rate of the U-Net encoder(s) relative to --lr, e.g. 0.1 for pretrained weights")
     parser.add_argument("--seed", type=int, default=0,
                         help="initialisation and training windows; validation windows stay fixed whatever the seed")
     parser.add_argument("--out", default="data/center_patch.pt")
@@ -604,8 +630,13 @@ def main():
                                                   multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(args.ema))
         eval_model = ema.module
         run_eval_model = torch.compile(eval_model) if args.compile else eval_model
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, args.lr, total_steps=args.steps)
+    encoder_params = {id(p) for name, p in model.named_parameters()
+                      if args.model == "unet" and (name.startswith("net.encoder.") or name.startswith("context_encoder."))}
+    groups_lr = [([p for p in model.parameters() if id(p) in encoder_params], args.lr * args.encoder_lr_scale),
+                 ([p for p in model.parameters() if id(p) not in encoder_params], args.lr)]
+    groups_lr = [(params, lr) for params, lr in groups_lr if params]
+    optimizer = torch.optim.AdamW([{"params": params, "lr": lr} for params, lr in groups_lr])
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, [lr for _, lr in groups_lr], total_steps=args.steps)
     pixel_counts = [sum(raster_meta[a]["pixel_counts"][name] for a in args.areas) for name in class_names]
     weights = class_weights(pixel_counts, args.class_weight_power)
     if args.class_weight_power:
@@ -621,12 +652,16 @@ def main():
             "encoder": args.encoder if args.model == "unet" else None, "size": args.size, "target": args.target,
             "class_weight_power": args.class_weight_power, "lighting": args.lighting,
             "context_scale": args.context_scale, "ema": args.ema, "seed": args.seed,
+            "lovasz": args.lovasz, "encoder_lr_scale": args.encoder_lr_scale,
             "areas": args.areas, "test_areas": args.test_areas}
     start = time.time()
     for step, (labels, images) in enumerate(train, start=1):
         x, y = encode(labels, images, num_classes, args.target, args.input, device, memory_format)
         with torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
-            loss = F.cross_entropy(run_model(x), y, weight=weights, ignore_index=IGNORE)
+            logits = run_model(x)
+            loss = F.cross_entropy(logits, y, weight=weights, ignore_index=IGNORE)
+        if args.lovasz:  # outside autocast: the sort and cumulative sums need float32
+            loss = loss + args.lovasz * lovasz_softmax(logits, y)
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
