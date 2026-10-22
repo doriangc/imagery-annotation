@@ -14,7 +14,7 @@ from PIL import Image
 from rasterio.features import rasterize
 from rasterio.transform import from_origin
 
-from areas import AREAS
+from areas import AREAS, area_dir
 from label_report import bike_streets
 
 CRS = "EPSG:28992"
@@ -124,17 +124,18 @@ def load(path: str, bike_street_lines: list | None = None) -> tuple[np.ndarray, 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("area", nargs="?", default="houten", choices=sorted(AREAS),
-                        help="area from areas.py; reads data/<area>_bgt.pkl and crops to its bbox, since fetched "
+                        help="area from areas.py; reads data/nl/<area>_bgt.pkl and crops to its bbox, since fetched "
                              "polygons stick out past it")
     parser.add_argument("--res", type=float, default=0.08, help="metres per pixel; 0.08 matches PDOK's 8 cm aerial photos")
-    parser.add_argument("--out", help="output prefix (default: data/<area>_classes_8cm)")
+    parser.add_argument("--out", help="output prefix (default: data/nl/<area>_classes_8cm)")
     parser.add_argument("--keep-bike-streets", action="store_true",
                         help="label fietsstraten with their BGT class instead of IGNORE")
     args = parser.parse_args()
-    args.out = args.out or f"data/{args.area}_classes_8cm"
+    folder = area_dir(args.area)
+    args.out = args.out or f"{folder}/{args.area}_classes_8cm"
 
-    lines = None if args.keep_bike_streets else bike_streets(args.area, "data")
-    geoms, class_ids = load(f"data/{args.area}_bgt.pkl", lines)
+    lines = None if args.keep_bike_streets else bike_streets(args.area, folder)
+    geoms, class_ids = load(f"{folder}/{args.area}_bgt.pkl", lines)
     to_rd = pyproj.Transformer.from_crs("EPSG:4326", CRS, always_xy=True)
     west, south, east, north = to_rd.transform_bounds(*AREAS[args.area])
     # Even metres sit on the 8 cm grid of PDOK's aerial photos (multiples of 0.08 m), which the WMS snaps to

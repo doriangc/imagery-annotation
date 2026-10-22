@@ -1,9 +1,8 @@
 import argparse
 import httpx
-import os
 import pickle
 
-from areas import AREAS
+from areas import AREAS, area_dir
 
 PAGE_SIZE = 1000
 API = "https://api.pdok.nl/lv/bgt/ogc/v1/collections/{collection}/items"
@@ -46,14 +45,13 @@ def fetch(bbox: tuple) -> dict:
     return out
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fetch BGT for named areas (see areas.py) to data/<area>_bgt.pkl")
+    parser = argparse.ArgumentParser(description="Fetch BGT for named areas (see areas.py) to data/nl/<area>_bgt.pkl")
     parser.add_argument("areas", nargs="*", default=["houten"], choices=sorted(AREAS), metavar="AREA",
                         help=f"one or more of: {', '.join(AREAS)}")
     args = parser.parse_args()
 
-    os.makedirs("data", exist_ok=True)
     for area in args.areas:
         out = fetch(AREAS[area])
-        with open(f"data/{area}_bgt.pkl", "wb") as file:
+        with open(f"{area_dir(area)}/{area}_bgt.pkl", "wb") as file:
             pickle.dump(out, file)
         print(f"{area}: " + ", ".join(f"{len(v)} {k}" for k, v in out.items()), flush=True)

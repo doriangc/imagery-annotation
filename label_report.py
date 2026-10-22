@@ -5,7 +5,7 @@ For each area:
 - fietsstraten from OpenStreetMap (cyclestreet=yes / bicycle_road=yes) and which BGT function the polygons
   under them have, which shows whether a municipality maps them as carriageway or as bike path
 
-OSM results are cached in data/<area>_osm_bikestreets.json. Writes a Markdown report.
+OSM results are cached in data/nl/<area>_osm_bikestreets.json. Writes a Markdown report.
 """
 import argparse
 import json
@@ -18,15 +18,15 @@ import numpy as np
 import pyproj
 import shapely
 
-from areas import AREAS
+from areas import AREAS, area_dir
 
 OVERPASS = "https://overpass-api.de/api/interpreter"
 CRS = "EPSG:28992"
 
 
-def bike_streets(area: str, data_dir: str) -> list[list[tuple[float, float]]]:
-    """OSM fietsstraat centrelines in the area, as lon/lat point lists (cached)."""
-    path = f"{data_dir}/{area}_osm_bikestreets.json"
+def bike_streets(area: str, folder: str) -> list[list[tuple[float, float]]]:
+    """OSM fietsstraat centrelines in the area, as lon/lat point lists (cached in the area's folder)."""
+    path = f"{folder}/{area}_osm_bikestreets.json"
     if os.path.exists(path):
         with open(path) as file:
             return json.load(file)
@@ -54,7 +54,7 @@ def report_area(area: str, data_dir: str) -> dict:
     to_rd = pyproj.Transformer.from_crs("EPSG:4326", CRS, always_xy=True)
     project = lambda g: shapely.transform(g, lambda xy: np.column_stack(to_rd.transform(xy[:, 0], xy[:, 1])))
     bbox = shapely.box(*to_rd.transform_bounds(*AREAS[area]))
-    with open(f"{data_dir}/{area}_bgt.pkl", "rb") as file:
+    with open(f"{area_dir(area, data_dir)}/{area}_bgt.pkl", "rb") as file:
         features = pickle.load(file)["wegdeel"]
     geoms = project(shapely.from_geojson([json.dumps(f["geometry"]) for f in features]))
     geoms = shapely.intersection(geoms, bbox)
@@ -63,7 +63,7 @@ def report_area(area: str, data_dir: str) -> dict:
     areas = shapely.area(geoms)
     shares = {fn: float(areas[functions == fn].sum() / areas.sum()) for fn in np.unique(functions)}
 
-    lines = [shapely.LineString(line) for line in bike_streets(area, data_dir) if len(line) > 1]
+    lines = [shapely.LineString(line) for line in bike_streets(area, area_dir(area, data_dir)) if len(line) > 1]
     lines = shapely.intersection(project(np.array(lines, dtype=object)), bbox) if lines else np.array([])
     total = float(shapely.length(lines).sum()) if len(lines) else 0.0
     under = {}

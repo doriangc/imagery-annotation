@@ -11,7 +11,8 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-from center_patch import IGNORE, VAL_FRACTION, build_context, context_window, encode_imagery, load_model
+from areas import area_dir
+from center_patch import IGNORE, VAL_FRACTION, build_context, context_window, encode_imagery, imagery_file, load_model
 from rasterize import CLASSES
 
 PALETTE = np.full((256, 3), 255, dtype=np.uint8)  # IGNORE shows as white
@@ -95,8 +96,10 @@ def main():
     stride = args.stride or target
     if args.extent % target or target % stride:
         parser.error(f"--extent must be a multiple of the model's target ({target}), which --stride must divide")
-    labels = np.load(f"{args.data_dir}/{args.area}_classes_8cm.npy", mmap_mode="r")
-    imagery_path = f"{args.data_dir}/{args.area}_aerial_2026.npy"
+    folder = area_dir(args.area, args.data_dir)
+    labels = np.load(f"{folder}/{args.area}_classes_8cm.npy", mmap_mode="r")
+    with open(f"{folder}/{args.area}_classes_8cm.json") as file:
+        imagery_path = f"{folder}/{imagery_file(json.load(file), args.area)}"
     imagery = np.load(imagery_path, mmap_mode="r")
     context_scale = checkpoint.get("context_scale", 0)
     context = np.load(build_context(imagery_path, context_scale), mmap_mode="r") if context_scale else None

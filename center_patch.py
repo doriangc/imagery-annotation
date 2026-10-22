@@ -17,11 +17,13 @@ Training windows get a random 90° rotation and flip, and with --lighting random
 validation windows stay as they are.
 Runs on a GPU when one is available, with windows sampled by DataLoader worker processes.
 
-Areas (see areas.py) are read from data/<area>_classes_8cm.* and data/<area>_aerial_2026.npy. Training areas
+Areas (see areas.py) are read from data/nl/<area>_classes_8cm.* and data/nl/<area>_aerial_2026.npy, or the imagery file
+the label .json names (US areas from us_fetch.py, in data/denver/ and data/dc/). The class table also comes from the .json, so the same code
+trains the BGT classes or the US road / not-road labels; all areas of a run must share it. Training areas
 (--areas) hold out their southern strip for validation; test areas (--test-areas) are held out entirely.
 
 With --context-scale N, each window also gets a context view: the same number of pixels around the same centre,
-downsampled N times (from data/<area>_aerial_2026_ctxN.npy, built on first use), stacked as 3 extra channels.
+downsampled N times (from <imagery>_ctxN.npy next to the photos, built on first use), stacked as 3 extra channels.
 Both views share a centre, so rotations and flips keep them consistent.
 """
 import argparse
@@ -35,6 +37,8 @@ from PIL import Image, ImageDraw, ImageFilter
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+
+from areas import area_dir
 
 VAL_FRACTION = 0.15  # the southern strip of the raster is held out
 IGNORE = 255  # label of pixels left out of the loss and scores (rasterize.IGNORE)
@@ -305,6 +309,11 @@ class FlipRotateAverage(nn.Module):
         return total / 8
 
 
+def imagery_file(labels_meta: dict, area: str) -> str:
+    """The imagery file of an area, as named by its label .json; BGT areas use the PDOK 2026 photos."""
+    return labels_meta.get("imagery", f"{area}_aerial_2026.npy")
+
+
 def load_model(path: str, device: str | torch.device = "cpu"):
     """A model from a checkpoint written by this script, in eval mode, plus the checkpoint's metadata."""
     checkpoint = torch.load(path, map_location=device)
@@ -558,8 +567,9 @@ def main():
     overlap = set(args.areas) & set(args.test_areas)
     if overlap:
         parser.error(f"areas can't be both training and test: {', '.join(sorted(overlap))}")
-    labels_path = lambda area: f"{args.data_dir}/{area}_classes_8cm"
-    imagery_path = lambda area: f"{args.data_dir}/{area}_aerial_2026.npy" if args.input == "imagery" else None
+    labels_path = lambda area: f"{area_dir(area, args.data_dir)}/{area}_classes_8cm"
+    imagery_path = lambda area: (f"{area_dir(area, args.data_dir)}/{imagery_file(raster_meta[area], area)}"
+                                 if args.input == "imagery" else None)
     raster_meta = {}
     for area in args.areas + args.test_areas:
         with open(f"{labels_path(area)}.json") as file:

@@ -15,7 +15,7 @@ project = lambda g: shapely.transform(g, lambda xy: np.column_stack(to_rd.transf
 VEHICLE = {"road", "parking", "bike_lane", "speed_bump"}
 results = {}
 for area in sys.argv[1:]:
-    data = pickle.load(open(f"/home/dorian/bgt-fit/data/{area}_bgt.pkl", "rb"))
+    data = pickle.load(open(f"/home/dorian/bgt-fit/data/nl/{area}_bgt.pkl", "rb"))
     rows = [(c, f["properties"]) for c in ("wegdeel", "ondersteunendwegdeel") for f in data[c]]
     geoms = project(shapely.from_geojson([json.dumps(f["geometry"]) for c in ("wegdeel", "ondersteunendwegdeel") for f in data[c]]))
     geoms = shapely.make_valid(geoms)
