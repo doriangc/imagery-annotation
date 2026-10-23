@@ -248,12 +248,16 @@ def label_shapes(area: str, bbox: tuple, crs: int) -> tuple[list, list]:
         # NAD83 -> WGS84 step differs from PROJ's, which put the labels ~1.1 m north-west of the photos
         native = transform_bounds(f"EPSG:{crs}", DRAPP_CRS, *bbox)
         features = query(client, DRCOG_ROADS.format(year=year), native, int(DRAPP_CRS.split(":")[1]),
-                         fields="OBJECTID,Type")
+                         fields="OBJECTID,Type,Update_Status")
         types = [f["properties"]["Type"] for f in features]
-        print(f"  DRCOG {year}: " + ", ".join(f"{t} {types.count(t)}" for t in sorted(set(types), key=str)))
+        added = [f["properties"]["Update_Status"] == "A" for f in features]
+        print(f"  DRCOG {year}: " + ", ".join(f"{t} {types.count(t)}" for t in sorted(set(types), key=str))
+              + f", {sum(added)} added since the last capture")
         geoms = [transform_geom(DRAPP_CRS, f"EPSG:{crs}", f["geometry"]) for f in features]
         shapes = [(g, 1) for g, t in zip(geoms, types) if t == "Corridor"]
         shapes += [(g, 0) for g, t in zip(geoms, types) if t == "Median"]  # medians sit on corridors
+        # Added in the 2024 update, so often not built yet (or built differently) in the older photos
+        shapes += [(g, IGNORE) for g, a in zip(geoms, added) if a]
         return shapes, []
     base = DC_PLANIMETRICS.format(year=year)
     shapes = []
